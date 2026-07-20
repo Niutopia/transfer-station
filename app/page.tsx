@@ -302,9 +302,8 @@ export default function Home() {
         <button className="brand" type="button" aria-label="返回页面顶部" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img className="brand-mark" src="/transfer-station-x.svg?v=1" alt="" aria-hidden="true" />
+          <strong className="brand-title">TRANSFER STATION</strong>
         </button>
-
-        <strong className="topbar-title">TRANSFER STATION</strong>
 
         <div className="top-actions">
           <button
