@@ -36,14 +36,6 @@ type MonitorData = {
   daily: Array<{ date: string; label: string; files: number; bytes: number }>;
   latestRun: { status: "ready" | "attention" | "active"; startedAt: string | null; taskState?: "running" | "paused" | "cancelling" | null; taskControllable?: boolean; stages: Stage[] };
   alerts: Array<{ level: "success" | "warning" | "error"; title: string; detail: string }>;
-  recentFiles: Array<{
-    name: string;
-    fileName: string;
-    relativePath: string;
-    sizeBytes: number;
-    modifiedAt: string;
-    status: "complete" | "partial";
-  }>;
   activeDownloads: Array<{
     name: string;
     fileName: string;
@@ -58,12 +50,6 @@ type MonitorData = {
     message?: string;
     resumed?: boolean;
     status: "downloading" | "resuming" | "retrying" | "refreshing" | "verifying" | "restarting";
-  }>;
-  pendingDownloads: Array<{
-    name: string;
-    fileName: string;
-    sizeBytes?: number;
-    status: "waiting" | "resumable";
   }>;
   progress?: {
     stage: string;
@@ -86,8 +72,6 @@ type MonitorData = {
     updatedAt?: string | null;
   } | null;
 };
-
-type Tab = "overview" | "library";
 
 const nf = new Intl.NumberFormat("zh-CN");
 
@@ -165,7 +149,6 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [startingTask, setStartingTask] = useState(false);
-  const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [taskMessage, setTaskMessage] = useState("");
   const [serviceOnline, setServiceOnline] = useState<boolean | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
@@ -263,25 +246,6 @@ export default function Home() {
   }, [load, loadServiceHealth]);
 
   useEffect(() => {
-    const syncFromHash = () => {
-      const hash = window.location.hash.slice(1);
-      if (hash === "overview" || hash === "library") setActiveTab(hash);
-    };
-    const frame = window.requestAnimationFrame(syncFromHash);
-    window.addEventListener("hashchange", syncFromHash);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("hashchange", syncFromHash);
-    };
-  }, []);
-
-  const selectTab = useCallback((tab: Tab) => {
-    setActiveTab(tab);
-    window.history.replaceState(null, "", `#${tab}`);
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  }, []);
-
-  useEffect(() => {
     if (!autoRefresh) return;
     const source = new EventSource("/api/events");
     source.onopen = () => {
@@ -360,11 +324,6 @@ export default function Home() {
           <span className="brand-text"><strong>TRANSFER STATION</strong><small>LOCAL MEDIA NODE // 01</small></span>
         </button>
 
-        <nav className="nav" role="tablist" aria-label="监控视图">
-          <button type="button" role="tab" aria-selected={activeTab === "overview"} className={activeTab === "overview" ? "active" : ""} onClick={() => selectTab("overview")}>今日概览</button>
-          <button type="button" role="tab" aria-selected={activeTab === "library"} className={activeTab === "library" ? "active" : ""} onClick={() => selectTab("library")}>视频库</button>
-        </nav>
-
         <div className="top-actions">
           <button
             className={`live-button ${autoRefresh ? "active" : ""}`}
@@ -384,8 +343,7 @@ export default function Home() {
       {error && <div className="inline-error" role="alert">{error}</div>}
 
       <div className="content">
-        <section className="main-column" aria-label={activeTab === "overview" ? "今日概览" : "视频库"}>
-          {activeTab === "overview" ? <>
+        <section className="main-column" aria-label="今日概览">
           <section className="hero">
             <div>
               <div className="eyebrow">DAILY QUEST // {fullDate(data.generatedAt)}</div>
@@ -407,14 +365,14 @@ export default function Home() {
                 <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
                 <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
               </>}
-              <button
+              {!isCrawling && <button
                 className="secondary highlight-btn"
                 type="button"
                 onClick={startTask}
-                disabled={startingTask || data.latestRun.status === "active" || serviceOnline === false}
+                disabled={startingTask || serviceOnline === false}
               >
-                {serviceOnline === false ? "任务服务离线" : startingTask || data.latestRun.status === "active" ? "任务运行中…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : "立即开始今日任务"}
-              </button>
+                {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : "立即开始今日任务"}
+              </button>}
               <button className="secondary" type="button" onClick={() => document.getElementById("collection-stages")?.scrollIntoView({ behavior: "smooth", block: "start" })}>查看阶段</button>
               <button className="primary" type="button" onClick={() => void load()} disabled={refreshing}>
                 {refreshing ? "正在刷新" : "刷新状态"}
@@ -488,38 +446,6 @@ export default function Home() {
           </section>
 
           <div className="footer-note"><span>{autoRefresh && realtimeConnected ? "实时连接已建立" : autoRefresh ? "实时连接中断，已降级为 10 秒轮询" : "实时更新已暂停"}</span><span>快照生成于 {clock(data.generatedAt)}</span></div>
-          </> : <>
-          <section className="library-summary" aria-label="视频库摘要">
-            <article><span>中转站文件</span><strong>{nf.format(data.overview.totalFiles)}</strong><small>{formatBytes(data.overview.totalBytes)}</small></article>
-            <article><span>当前下载</span><strong>{nf.format(data.activeDownloads.length)}</strong><small>{data.activeDownloads.length ? "正在写入分片" : data.overview.partialDownloads ? `${data.overview.partialDownloads} 个分片等待续传` : "暂无活动下载"}</small></article>
-            <article><span>待处理</span><strong>{nf.format(data.overview.pendingVideos)}</strong><small>包含等待解析与下载的项目</small></article>
-          </section>
-
-          <section className="panel" aria-labelledby="recent-files-title">
-            <div className="panel-head">
-              <div><h2 id="recent-files-title">最近入库</h2><p>按文件修改时间排序，仅显示已完成文件</p></div>
-              <span className="quiet-meta">共 {nf.format(data.overview.totalFiles)} 个文件</span>
-            </div>
-            {data.recentFiles.length ? <div className="file-list">
-              {data.recentFiles.map((file) => <div className="file-row" key={file.relativePath}>
-                <span className="file-icon" aria-hidden="true">MP4</span>
-                <span className="file-name"><strong>{file.name}</strong><small>{file.fileName}</small></span>
-                <span>{formatBytes(file.sizeBytes)}</span>
-                <time>{clock(file.modifiedAt)}</time>
-                <span className="file-status">已完成</span>
-              </div>)}
-            </div> : <div className="empty-state"><span aria-hidden="true">↓</span><div><strong>中转站还是空的</strong><p>开始今日任务后，完成的视频会显示在这里。</p></div></div>}
-          </section>
-
-          {(data.activeDownloads.length > 0 || data.pendingDownloads.length > 0) && <section className="panel" aria-labelledby="queue-title">
-            <div className="panel-head"><div><h2 id="queue-title">下载队列</h2><p>活动项优先显示，随后是等待项目</p></div></div>
-            <div className="queue-list">
-              {data.activeDownloads.map((item) => <div className="queue-row" key={item.fileName}><span className="queue-state active">{item.progressPercent != null ? `${item.progressPercent.toFixed(0)}%` : downloadStateLabel(item.status)}</span><strong>{item.name}</strong><span>{formatBytes(item.speedBytesS ?? 0)}/s · {formatDuration(item.etaSeconds)}</span></div>)}
-              {data.pendingDownloads.slice(0, 20).map((item) => <div className="queue-row" key={item.fileName}><span className={`queue-state ${item.status === "resumable" ? "resume" : ""}`}>{item.status === "resumable" ? "续传" : "等待"}</span><strong>{item.name}</strong><span>{item.sizeBytes ? `${formatBytes(item.sizeBytes)} · ${item.fileName}` : item.fileName}</span></div>)}
-            </div>
-          </section>}
-          <div className="footer-note"><span>仅展示本地文件，不上传媒体内容</span><span>快照生成于 {clock(data.generatedAt)}</span></div>
-          </>}
         </section>
 
         <aside className="side-column" aria-label="运行状态">

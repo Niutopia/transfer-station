@@ -47,18 +47,19 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(new Set(dailyConfig.sources.map((source) => source.url)).size, 5);
 });
 
-test("navigation uses two persistent tabs and the shared favicon", async () => {
+test("dashboard keeps a single focused monitor and the shared favicon", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /今日概览/);
   assert.match(source, /采集阶段/);
-  assert.match(source, /视频库/);
+  assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
   assert.doesNotMatch(source, /className="panel run-panel"/);
   assert.match(source, /className="metric-details"/);
-  assert.match(source, /role="tablist"/);
-  assert.match(source, /window\.location\.hash\.slice\(1\)/);
-  assert.match(source, /replaceState\(null, "", `#\$\{tab\}`\)/);
+  assert.match(source, /\{!isCrawling && <button/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
+  const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(styles, /\.hero-actions\s*\{[^}]*flex-wrap:\s*nowrap/);
+  assert.doesNotMatch(styles, /\.nav(?:\s|\{|:)/);
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.equal((layout.match(/transfer-station-x\.svg\?v=1/g) ?? []).length, 3);
 });
