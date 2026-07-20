@@ -193,7 +193,7 @@ def main() -> int:
     partial_by_key = {Path(path.name.removesuffix(".part")).stem: path for path in partials}
     active_downloads = []
     active_keys = set(partial_by_key) | set(progress_by_key)
-    for key in sorted(active_keys):
+    for key in sorted(active_keys if is_crawling else set()):
         p = partial_by_key.get(key)
         active_keys.add(key)
         file_size = p.stat().st_size if p else 0
@@ -222,20 +222,31 @@ def main() -> int:
         })
 
     pending_downloads = []
+    if not is_crawling:
+        for key, partial in sorted(partial_by_key.items()):
+            if key in resolved_keys and key not in downloaded_keys:
+                pending_downloads.append({
+                    "name": title_by_key.get(key, key),
+                    "fileName": partial.name,
+                    "sizeBytes": partial.stat().st_size,
+                    "status": "resumable",
+                })
     for key, title in title_by_key.items():
-        if key not in downloaded_keys and key not in active_keys:
+        if key in resolved_keys and key not in downloaded_keys and key not in active_keys:
             pending_downloads.append({
                 "name": title,
                 "fileName": f"{key}.mp4",
                 "status": "waiting"
             })
 
-    pending_count = len(pending_downloads)
     unique_videos = int(metadata.get("unique_videos") or len(listed_keys))
     resolved_count = len(resolved_keys)
     downloaded_count = len(downloaded_keys)
+    pending_count = max(0, unique_videos - downloaded_count)
     raw_links = int(metadata.get("raw_detail_links") or unique_videos)
     duplicates = int(metadata.get("duplicates_removed") or max(0, raw_links - unique_videos))
+    has_attention = any(alert.get("level") in {"warning", "error"} for alert in alerts)
+    run_status = "active" if is_crawling else ("ready" if unique_videos and downloaded_count == unique_videos and not has_attention else "attention")
 
     payload = {
         "generatedAt": now.isoformat(timespec="seconds"),
@@ -270,7 +281,7 @@ def main() -> int:
         "daily": day_rows,
         "types": [{"name": name, "count": count} for name, count in types.most_common()],
         "latestRun": {
-            "status": "active" if is_crawling else ("ready" if resolved_count == unique_videos and unique_videos else "attention"),
+            "status": run_status,
             "startedAt": str(lock_payload.get("startedAt") or latest_crawl_at) if is_crawling else latest_crawl_at,
             "taskState": lock_payload.get("state") if lock_payload else None,
             "taskControllable": bool(lock_payload.get("controllable")) if lock_payload else False,
@@ -278,7 +289,7 @@ def main() -> int:
                 {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},
                 {"name": "去重", "status": "active" if is_crawling else ("done" if unique_videos else "waiting"), "value": unique_videos, "note": f"移除 {duplicates} 个重复"},
                 {"name": "媒体解析", "status": "active" if is_crawling else ("done" if resolved_count == unique_videos and unique_videos else "attention"), "value": resolved_count, "note": f"共 {unique_videos} 个唯一视频"},
-                {"name": "下载入库", "status": "done" if downloaded_count == unique_videos and unique_videos else "active" if (partials or is_crawling) else "waiting", "value": downloaded_count, "note": f"目标目录：{STAGING.name}"},
+                {"name": "下载入库", "status": "done" if downloaded_count == unique_videos and unique_videos else "active" if is_crawling else "attention" if partials else "waiting", "value": downloaded_count, "note": f"目标目录：{STAGING.name}"},
             ],
         },
         "alerts": alerts,

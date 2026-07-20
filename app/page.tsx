@@ -62,7 +62,8 @@ type MonitorData = {
   pendingDownloads: Array<{
     name: string;
     fileName: string;
-    status: "waiting";
+    sizeBytes?: number;
+    status: "waiting" | "resumable";
   }>;
   progress?: {
     stage: string;
@@ -348,7 +349,7 @@ export default function Home() {
     data.overview.uniqueVideos,
     data.overview.resolvedVideos,
   ];
-  const stageLabels = ["抓取", "去重", "解析", "下载"];
+  const stageLabels = ["STAGE 01", "STAGE 02", "STAGE 03", "STAGE 04"];
 
   return (
     <main className="app-shell">
@@ -356,7 +357,7 @@ export default function Home() {
         <button className="brand" type="button" aria-label="返回今日概览" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img className="brand-mark" src="/transfer-station-x.svg?v=1" alt="" aria-hidden="true" />
-          <span className="brand-text"><strong>Transfer station</strong><small>本地视频采集器</small></span>
+          <span className="brand-text"><strong>TRANSFER STATION</strong><small>LOCAL MEDIA NODE // 01</small></span>
         </button>
 
         <nav className="nav" role="tablist" aria-label="监控视图">
@@ -387,7 +388,7 @@ export default function Home() {
           {activeTab === "overview" ? <>
           <section className="hero">
             <div>
-              <div className="eyebrow">{fullDate(data.generatedAt)} · 今日任务</div>
+              <div className="eyebrow">DAILY QUEST // {fullDate(data.generatedAt)}</div>
               <h1>{isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : data.progress?.stage === "downloading" ? `正在下载 ${data.progress.done}/${data.progress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "每日采集与下载已完成" : downloading ? "每日采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "今日采集需要检查"}</h1>
               <p>
                 已配置 {data.source.listingCount} 个榜单 × 每榜前 {data.source.pagesPerListing} 页；
@@ -423,7 +424,7 @@ export default function Home() {
 
           {data.progress && data.progress.total > 0 && <section className={`live-task-panel stage-${data.progress.stage}`} aria-labelledby="live-task-title">
             <div className="live-task-head">
-              <div><span className="live-kicker"><i />{progressIsActive ? "实时任务" : "最近任务"}</span><h2 id="live-task-title">{progressTitle(data.progress.stage)}</h2></div>
+              <div><span className="live-kicker"><i />{progressIsActive ? "LIVE TASK" : "LAST TASK"}</span><h2 id="live-task-title">{progressTitle(data.progress.stage)}</h2></div>
               <strong>{progressPercent.toFixed(0)}%</strong>
             </div>
             <div className="progress-caption"><span>文件进度</span><strong>{data.progress.done}/{data.progress.total}</strong></div>
@@ -490,8 +491,8 @@ export default function Home() {
           </> : <>
           <section className="library-summary" aria-label="视频库摘要">
             <article><span>中转站文件</span><strong>{nf.format(data.overview.totalFiles)}</strong><small>{formatBytes(data.overview.totalBytes)}</small></article>
-            <article><span>当前下载</span><strong>{nf.format(data.activeDownloads.length)}</strong><small>{data.overview.partialDownloads ? "正在写入分片" : "暂无活动下载"}</small></article>
-            <article><span>待下载</span><strong>{nf.format(data.pendingDownloads.length)}</strong><small>按任务顺序处理</small></article>
+            <article><span>当前下载</span><strong>{nf.format(data.activeDownloads.length)}</strong><small>{data.activeDownloads.length ? "正在写入分片" : data.overview.partialDownloads ? `${data.overview.partialDownloads} 个分片等待续传` : "暂无活动下载"}</small></article>
+            <article><span>待处理</span><strong>{nf.format(data.overview.pendingVideos)}</strong><small>包含等待解析与下载的项目</small></article>
           </section>
 
           <section className="panel" aria-labelledby="recent-files-title">
@@ -514,7 +515,7 @@ export default function Home() {
             <div className="panel-head"><div><h2 id="queue-title">下载队列</h2><p>活动项优先显示，随后是等待项目</p></div></div>
             <div className="queue-list">
               {data.activeDownloads.map((item) => <div className="queue-row" key={item.fileName}><span className="queue-state active">{item.progressPercent != null ? `${item.progressPercent.toFixed(0)}%` : downloadStateLabel(item.status)}</span><strong>{item.name}</strong><span>{formatBytes(item.speedBytesS ?? 0)}/s · {formatDuration(item.etaSeconds)}</span></div>)}
-              {data.pendingDownloads.slice(0, 20).map((item) => <div className="queue-row" key={item.fileName}><span className="queue-state">等待</span><strong>{item.name}</strong><span>{item.fileName}</span></div>)}
+              {data.pendingDownloads.slice(0, 20).map((item) => <div className="queue-row" key={item.fileName}><span className={`queue-state ${item.status === "resumable" ? "resume" : ""}`}>{item.status === "resumable" ? "续传" : "等待"}</span><strong>{item.name}</strong><span>{item.sizeBytes ? `${formatBytes(item.sizeBytes)} · ${item.fileName}` : item.fileName}</span></div>)}
             </div>
           </section>}
           <div className="footer-note"><span>仅展示本地文件，不上传媒体内容</span><span>快照生成于 {clock(data.generatedAt)}</span></div>

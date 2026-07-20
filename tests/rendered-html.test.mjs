@@ -33,6 +33,12 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(status.overview.rawLinks - status.overview.uniqueVideos, status.overview.duplicatesRemoved);
   assert.equal(status.daily.length, 14);
   assert.equal(Array.isArray(status.recentFiles), true);
+  if (status.latestRun.status !== "active") {
+    assert.equal(status.activeDownloads.length, 0);
+    if (status.overview.partialDownloads > 0) {
+      assert.equal(status.pendingDownloads.some((item) => item.status === "resumable"), true);
+    }
+  }
   const stagingFiles = (await readdir(new URL("../中转站/", import.meta.url))).filter(name => !name.startsWith('.'));
   assert.equal(stagingFiles.every((name) => /\.(?:mp4|m4v|webm|ts|mkv|mov|avi)$/i.test(name)), true);
   assert.equal(status.overview.totalFiles <= stagingFiles.length, true);

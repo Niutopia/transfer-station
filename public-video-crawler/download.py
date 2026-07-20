@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import errno
 import hashlib
 import http.client
 import ipaddress
@@ -261,6 +262,27 @@ def _reset_partial(partial: Path) -> None:
     _meta_path(partial).unlink(missing_ok=True)
 
 
+def _finalize_partial(partial: Path, final: Path) -> None:
+    """Move a completed part atomically, copying when Docker mounts differ."""
+    try:
+        os.replace(partial, final)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        temporary = final.with_name(f".{final.name}.{os.getpid()}.finalizing")
+        temporary.unlink(missing_ok=True)
+        try:
+            with partial.open("rb") as source, temporary.open("wb") as target:
+                shutil.copyfileobj(source, target, CHUNK_SIZE)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temporary, final)
+            partial.unlink()
+        finally:
+            temporary.unlink(missing_ok=True)
+    _meta_path(partial).unlink(missing_ok=True)
+
+
 def _parse_content_range(value: str | None) -> tuple[int, int, int] | None:
     match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", value or "", re.IGNORECASE)
     if not match:
@@ -361,6 +383,11 @@ def download_one(
             offset = 0
             saved_meta = {}
             resumed_any = False
+        saved_total = int(saved_meta.get("totalBytes") or 0)
+        if offset and saved_total == offset:
+            _report(progress_callback, item, final, state="verifying", bytes_done=offset, bytes_total=offset, attempt=attempt, retries=retries, resumed=True)
+            _finalize_partial(partial, final)
+            return _verify_and_result(final, item, started_at, True)
         headers = {"User-Agent": USER_AGENT, "Accept": "video/*,application/octet-stream"}
         if item.get("canonical_url"):
             headers["Referer"] = item["canonical_url"]
@@ -376,23 +403,25 @@ def download_one(
             try:
                 response = opener.open(request, timeout=timeout)
             except urllib.error.HTTPError as exc:
-                if exc.code == 416 and offset:
-                    remote_total = _unsatisfied_total(exc.headers.get("Content-Range") if exc.headers else None)
+                status_code = exc.code
+                response_headers = exc.headers
+                exc.close()
+                if status_code == 416 and offset:
+                    remote_total = _unsatisfied_total(response_headers.get("Content-Range") if response_headers else None)
                     if remote_total and remote_total == offset:
                         _report(progress_callback, item, final, state="verifying", bytes_done=offset, bytes_total=offset, attempt=attempt, retries=retries, resumed=True)
-                        partial.replace(final)
-                        _meta_path(partial).unlink(missing_ok=True)
+                        _finalize_partial(partial, final)
                         return _verify_and_result(final, item, started_at, True)
-                if exc.code in EXPIRED_STATUS_CODES:
-                    raise ExpiredMediaError(f"媒体链接失效: HTTP {exc.code}") from exc
-                if exc.code in TRANSIENT_STATUS_CODES:
-                    retry_after_raw = exc.headers.get("Retry-After") if exc.headers else None
+                if status_code in EXPIRED_STATUS_CODES:
+                    raise ExpiredMediaError(f"媒体链接失效: HTTP {status_code}") from exc
+                if status_code in TRANSIENT_STATUS_CODES:
+                    retry_after_raw = response_headers.get("Retry-After") if response_headers else None
                     try:
                         retry_after = min(30.0, float(retry_after_raw)) if retry_after_raw else 0.0
                     except ValueError:
                         retry_after = 0.0
-                    raise TransientDownloadError(f"媒体服务暂时不可用: HTTP {exc.code}", retry_after) from exc
-                raise DownloadError(f"媒体请求失败: HTTP {exc.code}") from exc
+                    raise TransientDownloadError(f"媒体服务暂时不可用: HTTP {status_code}", retry_after) from exc
+                raise DownloadError(f"媒体请求失败: HTTP {status_code}") from exc
 
             with response:
                 public_https_url(response.geturl())
@@ -475,8 +504,7 @@ def download_one(
                 if expected_total and total != expected_total:
                     raise TransientDownloadError(f"下载不完整: {total}/{expected_total} 字节")
                 _report(progress_callback, item, final, state="verifying", bytes_done=total, bytes_total=expected_total or total, speed=smoothed_speed, attempt=attempt, retries=retries, resumed=resumed_any)
-                partial.replace(final)
-                _meta_path(partial).unlink(missing_ok=True)
+                _finalize_partial(partial, final)
                 return _verify_and_result(final, item, started_at, resumed_any)
         except RestartDownload as exc:
             _report(progress_callback, item, final, state="restarting", bytes_done=offset, attempt=attempt, retries=retries, message=str(exc), resumed=True)

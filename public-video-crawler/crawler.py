@@ -372,10 +372,13 @@ def fetch_html(
                 charset = response.headers.get_content_charset() or "utf-8"
                 return raw.decode(charset, errors="replace")
         except urllib.error.HTTPError as exc:
-            retryable = exc.code in {408, 425, 429, 500, 502, 503, 504}
+            status_code = exc.code
+            response_headers = exc.headers
+            exc.close()
+            retryable = status_code in {408, 425, 429, 500, 502, 503, 504}
             if not retryable or attempt >= retries:
-                raise CrawlerError(f"HTTP {exc.code}: {path}") from exc
-            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                raise CrawlerError(f"HTTP {status_code}: {path}") from exc
+            retry_after = response_headers.get("Retry-After") if response_headers else None
             try:
                 wait_seconds = max(0.0, min(30.0, float(retry_after))) if retry_after else 0.0
             except ValueError:

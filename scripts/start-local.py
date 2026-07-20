@@ -99,6 +99,8 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                     update_lock(lock_path, state="running")
                 elif action == "cancel":
                     update_lock(lock_path, state="cancelling")
+                    if payload.get("state") == "paused":
+                        os.killpg(pgid, signal.SIGCONT)
                     os.killpg(pgid, signal.SIGTERM)
                     for name in ("crawl-progress.json", "download-progress.json"):
                         progress_path = PROJECT / "data" / name

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-import unittest
+import errno
 import io
 import json
+import os
 import sys
 import tempfile
+import unittest
 import urllib.error
 from email.message import Message
 from pathlib import Path
@@ -321,7 +323,7 @@ class CrawlerTests(unittest.TestCase):
             partials.mkdir()
             partial = partials / "abc12345.mp4.part"
             partial.write_bytes(b"abc")
-            download._write_meta(partial, {"viewkey": "abc12345", "totalBytes": 3, "etag": "same"})
+            download._write_meta(partial, {"viewkey": "abc12345", "totalBytes": 0, "etag": "same"})
             headers = Message()
             headers["Content-Range"] = "bytes */3"
             opener = mock.Mock()
@@ -329,6 +331,39 @@ class CrawlerTests(unittest.TestCase):
             result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024)
             self.assertEqual(result["status"], "downloaded")
             self.assertEqual((output / "abc12345.mp4").read_bytes(), b"abc")
+
+    def test_complete_partial_is_finalized_across_filesystems_without_network(self) -> None:
+        item = {
+            "viewkey": "abc12345",
+            "media_url": "https://media.example/video.mp4",
+            "canonical_url": "https://91porn.com/view_video.php?viewkey=abc12345",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            partials = root / "partials"
+            output.mkdir()
+            partials.mkdir()
+            partial = partials / "abc12345.mp4.part"
+            final = output / "abc12345.mp4"
+            partial.write_bytes(b"complete")
+            download._write_meta(partial, {"viewkey": "abc12345", "totalBytes": 8, "etag": "same"})
+            real_replace = os.replace
+
+            def replace_with_cross_device_error(source, destination):
+                if Path(source) == partial and Path(destination) == final:
+                    raise OSError(errno.EXDEV, "cross-device link")
+                return real_replace(source, destination)
+
+            opener = mock.Mock()
+            with mock.patch.object(download.os, "replace", side_effect=replace_with_cross_device_error):
+                result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024)
+
+            self.assertEqual(result["status"], "downloaded")
+            self.assertEqual(final.read_bytes(), b"complete")
+            self.assertFalse(partial.exists())
+            self.assertFalse(download._meta_path(partial).exists())
+            opener.open.assert_not_called()
 
     def test_shared_task_lock_prevents_a_second_runner(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
