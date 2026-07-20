@@ -50,11 +50,10 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
 test("dashboard keeps a single focused monitor and the shared favicon", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /今日概览/);
-  assert.match(source, /采集阶段/);
+  assert.doesNotMatch(source, /采集阶段|查看阶段|className="metrics"|className="metric-details"/);
   assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
   assert.doesNotMatch(source, /className="panel run-panel"/);
-  assert.match(source, /className="metric-details"/);
   assert.match(source, /\{!isCrawling && <button/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
   const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");

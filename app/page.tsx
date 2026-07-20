@@ -2,13 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 
-type Stage = {
-  name: string;
-  status: "done" | "active" | "waiting" | "attention";
-  value: number;
-  note: string;
-};
-
 type MonitorData = {
   generatedAt: string;
   source: {
@@ -34,7 +27,7 @@ type MonitorData = {
   };
   storage: { usedBytes: number; diskFreeBytes: number; diskTotalBytes: number; diskUsedPercent: number };
   daily: Array<{ date: string; label: string; files: number; bytes: number }>;
-  latestRun: { status: "ready" | "attention" | "active"; startedAt: string | null; taskState?: "running" | "paused" | "cancelling" | null; taskControllable?: boolean; stages: Stage[] };
+  latestRun: { status: "ready" | "attention" | "active"; startedAt: string | null; taskState?: "running" | "paused" | "cancelling" | null; taskControllable?: boolean };
   alerts: Array<{ level: "success" | "warning" | "error"; title: string; detail: string }>;
   activeDownloads: Array<{
     name: string;
@@ -134,13 +127,6 @@ function progressTitle(stage: string) {
   if (stage === "failed") return "任务需要处理";
   if (stage === "cancelled") return "任务已取消";
   return "正在下载视频文件";
-}
-
-function stageStatus(status: Stage["status"]) {
-  if (status === "done") return "已完成";
-  if (status === "active") return "进行中";
-  if (status === "attention") return "需检查";
-  return "等待中";
 }
 
 export default function Home() {
@@ -307,14 +293,6 @@ export default function Home() {
   const knownBytePercent = data.progress?.bytesTotalKnown ? Math.min(100, (data.progress.bytesDone ?? 0) / data.progress.bytesTotalKnown * 100) : 0;
   const progressIsActive = Boolean(data.progress && !["complete", "failed", "cancelled"].includes(data.progress.stage));
   const taskPaused = data.latestRun.taskState === "paused";
-  const stageInputs = [
-    data.overview.rawLinks,
-    data.overview.rawLinks,
-    data.overview.uniqueVideos,
-    data.overview.resolvedVideos,
-  ];
-  const stageLabels = ["STAGE 01", "STAGE 02", "STAGE 03", "STAGE 04"];
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -373,7 +351,6 @@ export default function Home() {
               >
                 {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : "立即开始今日任务"}
               </button>}
-              <button className="secondary" type="button" onClick={() => document.getElementById("collection-stages")?.scrollIntoView({ behavior: "smooth", block: "start" })}>查看阶段</button>
               <button className="primary" type="button" onClick={() => void load()} disabled={refreshing}>
                 {refreshing ? "正在刷新" : "刷新状态"}
               </button>
@@ -409,23 +386,6 @@ export default function Home() {
             </div>}
           </section>}
 
-          <section className="metrics" id="collection-stages" aria-label="采集阶段">
-            {data.latestRun.stages.map((stage, index) => (
-              <article className="metric" key={stage.name}>
-                <div className="metric-head"><span className="metric-label">{stageLabels[index]}</span><span className="metric-name">{stage.name}</span></div>
-                <div className="metric-value">{nf.format(stage.value)} <span className="metric-note">{stage.note}</span></div>
-                <div className="metric-details" aria-label={`${stage.name}输入输出`}>
-                  <div><span>输入</span><strong>{nf.format(stageInputs[index] ?? stage.value)}</strong></div>
-                  <span className="metric-arrow" aria-hidden="true">→</span>
-                  <div><span>输出</span><strong>{nf.format(stage.value)}</strong></div>
-                </div>
-                <div className="metric-foot">
-                  <span className={`status ${stage.status}`}>{stageStatus(stage.status)}</span>
-                  <time>{clock(data.latestRun.startedAt)}</time>
-                </div>
-              </article>
-            ))}
-          </section>
           <section className="panel trend-panel" aria-labelledby="trend-title">
             <div className="panel-head">
               <div><h2 id="trend-title">近 7 天入库趋势</h2><p>按“中转站”中文件修改时间统计</p></div>
