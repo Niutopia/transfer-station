@@ -57,7 +57,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
 
 test("dashboard keeps a single focused monitor and the shared favicon", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
-  assert.match(source, /今日概览/);
+  assert.match(source, /任务监控/);
   assert.doesNotMatch(source, /采集阶段|查看阶段|className="metrics"|className="metric-details"/);
   assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
@@ -69,9 +69,11 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.match(source, /className="brand-title">TRANSFER STATION/);
   assert.doesNotMatch(source, /className="topbar-title"/);
   assert.doesNotMatch(source, /LOCAL MEDIA NODE|className="brand-text"/);
+  assert.doesNotMatch(source, /className="hero"|className="eyebrow"|className="hero-actions"/);
+  assert.match(source, /任务在线/);
   const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(styles, /\.hero-actions\s*\{[^}]*flex-wrap:\s*nowrap/);
   assert.match(styles, /\.topbar\s*\{[^}]*grid-template-columns:\s*1fr auto/);
+  assert.doesNotMatch(styles, /\.hero(?:\s|\{|:)|\.hero-actions|\.eyebrow/);
   assert.doesNotMatch(styles, /\.nav(?:\s|\{|:)/);
   const taskService = await readFile(new URL("../scripts/start-local.py", import.meta.url), "utf8");
   assert.match(taskService, /start_pending/);

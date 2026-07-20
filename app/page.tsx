@@ -114,15 +114,6 @@ function clock(value: string | null) {
   }).format(date);
 }
 
-function fullDate(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "short",
-  }).format(new Date(value));
-}
-
 function formatDuration(seconds?: number | null) {
   if (!seconds || !Number.isFinite(seconds) || seconds <= 0) return "计算中";
   const rounded = Math.round(seconds);
@@ -324,10 +315,6 @@ export default function Home() {
   const isCrawling = data.latestRun.status === "active";
   const taskAppearsActive = isCrawling || taskLaunching;
   const completedToday = data.latestRun.completedToday === true;
-  const taskReady = !isCrawling && data.overview.resolvedVideos === data.overview.uniqueVideos && data.overview.uniqueVideos > 0;
-  const allDownloaded = taskReady && data.overview.pendingVideos === 0 && data.overview.downloadedVideos >= data.overview.uniqueVideos;
-  const downloading = taskReady && !allDownloaded && data.overview.partialDownloads > 0;
-  const unresolvedVideos = Math.max(0, data.overview.uniqueVideos - data.overview.resolvedVideos);
   const currentProgress = data.currentProgress ?? (isCrawling ? data.progress : null);
   const lastProgress = data.lastProgress ?? (!isCrawling ? data.progress : null);
   const currentPercent = currentProgress?.total ? Math.min(100, currentProgress.done / currentProgress.total * 100) : 0;
@@ -347,6 +334,10 @@ export default function Home() {
         </button>
 
         <div className="top-actions">
+          <div className={`service-health ${serviceOnline === false ? "offline" : serviceOnline === true ? "online" : "checking"}`}>
+            <span aria-hidden="true" />
+            {serviceOnline === false ? "任务离线" : serviceOnline === true ? "任务在线" : "检查服务"}
+          </div>
           <button
             className={`live-button ${autoRefresh ? "active" : ""}`}
             type="button"
@@ -365,28 +356,7 @@ export default function Home() {
       {error && <div className="inline-error" role="alert">{error}</div>}
 
       <div className="content">
-        <section className="main-column" aria-label="今日概览">
-          <section className="hero">
-            <div>
-              <div className="eyebrow">MANUAL QUEST // {fullDate(data.generatedAt)}</div>
-              <h1>{taskLaunching && !isCrawling ? "正在启动抓取任务…" : isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : currentProgress?.stage === "downloading" ? `正在下载 ${currentProgress.done}/${currentProgress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "本次采集与下载已完成" : downloading ? "本次采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "采集状态需要检查"}</h1>
-              <p>
-                已配置 {data.source.listingCount} 个榜单 × 每榜前 {data.source.pagesPerListing} 页；
-                {isCrawling ? "状态通过实时连接自动更新，无需手动刷新。" : `最近任务得到 ${data.overview.uniqueVideos} 个唯一视频，`}
-                {isCrawling ? "" : allDownloaded ? "已全部进入中转站。" : `已入库 ${data.overview.downloadedVideos} 个，未解析 ${unresolvedVideos} 个，待处理 ${data.overview.pendingVideos} 个。`}
-              </p>
-              <div className={`service-health ${serviceOnline === false ? "offline" : serviceOnline === true ? "online" : "checking"}`}>
-                <span aria-hidden="true" />
-                {serviceOnline === false ? "任务服务离线" : serviceOnline === true ? "任务服务在线" : "正在检查任务服务"}
-              </div>
-            </div>
-            <div className="hero-actions">
-              <button className="primary" type="button" onClick={() => void load()} disabled={refreshing}>
-                {refreshing ? "正在刷新" : "刷新状态"}
-              </button>
-            </div>
-          </section>
-
+        <section className="main-column" aria-label="任务监控">
           <section className={`current-task-panel ${taskAppearsActive ? "is-active" : "is-idle"}`} aria-labelledby="current-task-title">
             <div className="current-task-head">
               <div>

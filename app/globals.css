@@ -141,7 +141,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 }
 
 .icon-button:active:not(:disabled),
-.primary:active:not(:disabled),
 .secondary:active:not(:disabled) { transform: translate(2px, 2px); box-shadow: none; }
 
 .inline-error {
@@ -159,64 +158,23 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 .content { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 24px; }
 .main-column { min-width: 0; }
 
-.hero {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  min-height: 154px;
-  margin-bottom: 24px;
-  padding: 24px 28px;
-  overflow: hidden;
-  border: 3px solid var(--line);
-  background: var(--surface);
-  box-shadow: var(--shadow-lg);
-}
-
-.hero::after {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 78px;
-  height: 10px;
-  background: linear-gradient(90deg, var(--green) 0 25%, var(--amber) 25% 50%, var(--accent) 50% 75%, var(--red) 75%);
-  content: "";
-}
-
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: var(--accent-dark);
-  font-family: var(--font-geist-mono), "SFMono-Regular", Menlo, Monaco, monospace;
-  font-size: 12px;
-  font-weight: 900;
-  letter-spacing: .06em;
-}
-
-.eyebrow::before { width: 12px; height: 12px; border: 2px solid var(--line); background: var(--amber); content: ""; }
-.hero h1 { max-width: 760px; margin: 14px 0 10px; font-size: clamp(25px, 2.5vw, 36px); line-height: 1.2; letter-spacing: -.04em; }
-.hero p { max-width: 780px; margin: 0; color: var(--muted); font-size: 13px; font-weight: 500; line-height: 1.75; }
 .service-health {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin-top: 13px;
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  background: var(--surface-soft);
+  padding: 8px 6px;
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
+  white-space: nowrap;
 }
-.service-health span { width: 7px; height: 7px; background: var(--line-soft); }
+.service-health span { width: 8px; height: 8px; border: 1px solid var(--line); background: var(--line-soft); }
 .service-health.online { color: var(--green-dark); }
 .service-health.online span { background: var(--green); }
 .service-health.offline { color: var(--red); }
 .service-health.offline span { background: var(--red); }
 
-.hero-actions { display: flex; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 11px; margin-left: 28px; }
-.secondary, .primary {
+.secondary {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -232,8 +190,7 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
   white-space: nowrap;
 }
 .secondary.danger { background: var(--red-soft); color: #812f2a; }
-.highlight-btn.secondary, .primary { background: var(--accent); color: #fff; }
-.primary { background: var(--green); color: #fff; }
+.highlight-btn.secondary { background: var(--accent); color: #fff; }
 
 .status {
   display: inline-flex;
@@ -404,8 +361,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 @media (max-width: 1180px) {
   .content { grid-template-columns: 1fr; }
   .side-column { position: static; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .hero { align-items: flex-start; flex-direction: column; gap: 24px; }
-  .hero-actions { justify-content: flex-start; max-width: none; margin-left: 0; }
 }
 
 @media (max-width: 840px) {
@@ -427,11 +382,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
   .brand-mark { width: 38px; height: 38px; }
   .brand-title { font-size: 12px; letter-spacing: .035em; }
   .live-button { display: none; }
-  .hero { padding: 24px 20px; }
-  .hero h1 { font-size: 25px; }
-  .hero-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
-  .hero-actions > * { white-space: normal; }
-  .hero-actions .highlight-btn { grid-column: 1 / -1; }
   .panel-head { align-items: flex-start; flex-direction: column; }
   .trend-summary { width: 100%; justify-content: space-between; }
   .trend-chart { gap: 5px; margin-inline: 12px; }
