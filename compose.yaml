@@ -1,0 +1,24 @@
+services:
+  transfer-station:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: transfer-station:local
+    container_name: transfer-station
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+      - ./中转站:/app/中转站
+      - ./public:/app/public
+      - ./public-video-crawler:/app/public-video-crawler
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
