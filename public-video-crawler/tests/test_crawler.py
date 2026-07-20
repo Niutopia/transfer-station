@@ -81,6 +81,14 @@ class CrawlerTests(unittest.TestCase):
             self.assertFalse(progress_history.archive_completed_progress(source, destination))
             self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["done"], 3)
 
+    def test_latest_run_event_ignores_malformed_trailing_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "run-history.jsonl"
+            history.write_text('{"timestamp":"2026-07-20T19:00:00+08:00","newVideos":2}\nnot-json\n', encoding="utf-8")
+            event = task_history.latest_run_event(history)
+            self.assertIsNotNone(event)
+            self.assertEqual(event["newVideos"], 2)
+
     def test_parser_deduplicates_and_prefers_visible_card(self) -> None:
         videos = crawler.parse_listing(FIXTURE, crawler.DEFAULT_URL, 1)
         by_key = {video.viewkey: video for video in videos}

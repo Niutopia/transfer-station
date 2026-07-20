@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from task_lock import lock_is_active, read_lock
-from task_history import latest_successful_daily_run
+from task_history import latest_run_event, latest_successful_daily_run
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -270,6 +270,7 @@ def main() -> int:
     has_attention = any(alert.get("level") in {"warning", "error"} for alert in alerts)
     run_status = "active" if is_crawling else ("ready" if unique_videos and downloaded_count == unique_videos and not has_attention else "attention")
     completed_run = latest_successful_daily_run(RUN_HISTORY, today=today)
+    latest_event = latest_run_event(RUN_HISTORY)
     completed_today = bool(
         completed_run
         and not is_crawling
@@ -318,6 +319,23 @@ def main() -> int:
             "taskControllable": bool(lock_payload.get("controllable")) if lock_payload else False,
             "completedToday": completed_today,
             "completedAt": completed_run.get("timestamp") if completed_today and completed_run else None,
+            "result": {
+                "status": "active" if is_crawling else (
+                    "success" if latest_event and latest_event.get("crawlExitCode") == 0 and latest_event.get("downloadExitCode") in {0, None}
+                    else "failed" if latest_event else "none"
+                ),
+                "startedAt": latest_event.get("startedAt") if latest_event else None,
+                "finishedAt": latest_event.get("timestamp") if latest_event else None,
+                "durationSeconds": latest_event.get("durationSeconds") if latest_event else None,
+                "rawLinks": int((latest_event or {}).get("rawLinks") or raw_links),
+                "uniqueVideos": int((latest_event or {}).get("uniqueVideos") or unique_videos),
+                "skippedVideos": int((latest_event or {}).get("skippedVideos") or metadata.get("known_videos_skipped") or 0),
+                "newVideos": int((latest_event or {}).get("newVideos") or 0),
+                "retryVideos": int((latest_event or {}).get("retryVideos") or 0),
+                "downloadedVideos": int((latest_event or {}).get("downloadedVideos") or 0),
+                "failedVideos": int((latest_event or {}).get("failedVideos") or 0),
+                "downloadedBytes": int((latest_event or {}).get("downloadedBytes") or 0),
+            },
             "stages": [
                 {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},
                 {"name": "去重", "status": "active" if is_crawling else ("done" if unique_videos else "waiting"), "value": unique_videos, "note": f"移除 {duplicates} 个重复"},

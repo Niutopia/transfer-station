@@ -8,6 +8,22 @@ from datetime import date, datetime
 from pathlib import Path
 
 
+def latest_run_event(path: Path) -> dict[str, object] | None:
+    """Return the latest valid task event, regardless of outcome or day."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(event, dict) and event.get("timestamp"):
+            return event
+    return None
+
+
 def latest_successful_daily_run(path: Path, *, today: date | None = None) -> dict[str, object] | None:
     target_day = today or datetime.now().astimezone().date()
     try:

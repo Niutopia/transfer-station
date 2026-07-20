@@ -48,7 +48,28 @@ type MonitorData = {
   };
   storage: { usedBytes: number; diskFreeBytes: number; diskTotalBytes: number; diskUsedPercent: number };
   daily: Array<{ date: string; label: string; files: number; bytes: number }>;
-  latestRun: { status: "ready" | "attention" | "active"; startedAt: string | null; taskState?: "running" | "paused" | "cancelling" | null; taskControllable?: boolean; completedToday?: boolean; completedAt?: string | null };
+  latestRun: {
+    status: "ready" | "attention" | "active";
+    startedAt: string | null;
+    taskState?: "running" | "paused" | "cancelling" | null;
+    taskControllable?: boolean;
+    completedToday?: boolean;
+    completedAt?: string | null;
+    result?: {
+      status: "active" | "success" | "failed" | "none";
+      startedAt?: string | null;
+      finishedAt?: string | null;
+      durationSeconds?: number | null;
+      rawLinks: number;
+      uniqueVideos: number;
+      skippedVideos: number;
+      newVideos: number;
+      retryVideos: number;
+      downloadedVideos: number;
+      failedVideos: number;
+      downloadedBytes: number;
+    };
+  };
   alerts: Array<{ level: "success" | "warning" | "error"; title: string; detail: string }>;
   activeDownloads: Array<{
     name: string;
@@ -315,6 +336,7 @@ export default function Home() {
   const currentKnownBytePercent = currentProgress?.bytesTotalKnown ? Math.min(100, (currentProgress.bytesDone ?? 0) / currentProgress.bytesTotalKnown * 100) : 0;
   const lastKnownBytePercent = lastProgress?.bytesTotalKnown ? Math.min(100, (lastProgress.bytesDone ?? 0) / lastProgress.bytesTotalKnown * 100) : 0;
   const taskPaused = data.latestRun.taskState === "paused";
+  const taskResult = data.latestRun.result;
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -353,8 +375,6 @@ export default function Home() {
                 {isCrawling ? "状态通过实时连接自动更新，无需手动刷新。" : `最近任务得到 ${data.overview.uniqueVideos} 个唯一视频，`}
                 {isCrawling ? "" : allDownloaded ? "已全部进入中转站。" : `已入库 ${data.overview.downloadedVideos} 个，未解析 ${unresolvedVideos} 个，待处理 ${data.overview.pendingVideos} 个。`}
               </p>
-              {taskError && <p className="task-feedback error" role="alert">{taskError}</p>}
-              {taskMessage && <p className="task-feedback success" role="status">{taskMessage}</p>}
               <div className={`service-health ${serviceOnline === false ? "offline" : serviceOnline === true ? "online" : "checking"}`}>
                 <span aria-hidden="true" />
                 {serviceOnline === false ? "任务服务离线" : serviceOnline === true ? "任务服务在线" : "正在检查任务服务"}
@@ -462,6 +482,30 @@ export default function Home() {
           <section className="side-card">
             <div className="side-title"><h2>运行状态</h2><span className={`status ${data.latestRun.status === "active" ? "active" : data.latestRun.status === "attention" ? "attention" : "done"}`}>{data.latestRun.status === "active" ? "运行中" : data.latestRun.status === "attention" ? "需检查" : "就绪"}</span></div>
             <div className="alert-list">{data.alerts.map((alert, index) => <div className={`alert-item ${alert.level}`} key={`${alert.title}-${index}`}><span aria-hidden="true" /><div><strong>{alert.title}</strong><p>{alert.detail}</p></div></div>)}</div>
+          </section>
+          <section className={`side-card task-result-card result-${taskAppearsActive ? "active" : taskResult?.status ?? "none"}`} aria-labelledby="task-result-title">
+            <div className="side-title">
+              <h2 id="task-result-title">本次任务结果</h2>
+              <span className={`status ${taskAppearsActive ? "active" : taskResult?.status === "failed" ? "attention" : "done"}`}>{taskAppearsActive ? "进行中" : taskResult?.status === "failed" ? "失败" : taskResult?.status === "success" ? "已完成" : "暂无"}</span>
+            </div>
+            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "failed" ? "任务未能完整完成" : "尚未运行任务"}</strong>
+            {taskAppearsActive ? <div className="task-result-grid">
+              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "准备中" : currentProgress?.stage === "downloading" ? "下载入库" : currentProgress?.stage === "resolving" ? "媒体解析" : "榜单抓取"}</strong></span>
+              <span><small>处理进度</small><strong>{currentProgress?.total ? `${currentProgress.done}/${currentProgress.total}` : "计算中"}</strong></span>
+              <span><small>活动下载</small><strong>{data.activeDownloads.length}</strong></span>
+              <span><small>实时速度</small><strong>{formatBytes(currentProgress?.speedBytesS ?? aggregateSpeed)}/s</strong></span>
+            </div> : taskResult && taskResult.status !== "none" ? <>
+              <div className="task-result-grid">
+                <span><small>检查链接</small><strong>{nf.format(taskResult.rawLinks)}</strong></span>
+                <span><small>新发现</small><strong>{nf.format(taskResult.newVideos)}</strong></span>
+                <span><small>本次入库</small><strong>{nf.format(taskResult.downloadedVideos)}</strong></span>
+                <span><small>{taskResult.failedVideos ? "失败" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.retryVideos)}</strong></span>
+              </div>
+              <p className="task-result-detail">去重后 {nf.format(taskResult.uniqueVideos)} 个视频，跳过 {nf.format(taskResult.skippedVideos)} 个已知内容{taskResult.downloadedBytes ? `，下载 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
+              <div className="task-result-time"><span>完成于 {clock(taskResult.finishedAt ?? null)}</span><span>{taskResult.durationSeconds ? `耗时 ${formatDuration(taskResult.durationSeconds)}` : "耗时未记录"}</span></div>
+            </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
+            {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}
+            {taskError && <p className="task-result-feedback error" role="alert">{taskError}</p>}
           </section>
         </aside>
       </div>

@@ -76,6 +76,7 @@ def main() -> int:
     crawl_code = 1
     download_code = None
     pending_payload = {}
+    task_started_at = datetime.now().astimezone()
     try:
         archive_completed_progress(
             DATA / "download-progress.json",
@@ -126,15 +127,38 @@ def main() -> int:
             os.replace(temporary_progress, progress_path)
         task_lock.release()
 
+    task_finished_at = datetime.now().astimezone()
+    pending_metadata = pending_payload.get("metadata", {}) if isinstance(pending_payload, dict) else {}
+    pending_videos = pending_payload.get("videos", []) if isinstance(pending_payload, dict) else []
+    if not isinstance(pending_metadata, dict):
+        pending_metadata = {}
+    if not isinstance(pending_videos, list):
+        pending_videos = []
+    progress_payload = {}
+    if pending_videos:
+        try:
+            progress_payload = json.loads((DATA / "download-progress.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            progress_payload = {}
+    processed_videos = int(progress_payload.get("done") or 0) if isinstance(progress_payload, dict) else 0
+    failed_videos = int(progress_payload.get("failed") or 0) if isinstance(progress_payload, dict) else 0
     event = {
-        "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "timestamp": task_finished_at.isoformat(timespec="seconds"),
+        "startedAt": task_started_at.isoformat(timespec="seconds"),
+        "durationSeconds": round((task_finished_at - task_started_at).total_seconds(), 1),
         "crawlExitCode": crawl_code,
         "downloadExitCode": download_code,
         "downloadRequested": args.download,
         "pages": args.pages,
         "sources": len(source_urls),
-        "newVideos": int(pending_payload.get("metadata", {}).get("new_videos", 0)) if args.download and isinstance(pending_payload, dict) else None,
-        "retryVideos": int(pending_payload.get("metadata", {}).get("retry_videos", 0)) if args.download and isinstance(pending_payload, dict) else None,
+        "rawLinks": int(pending_metadata.get("raw_detail_links") or 0),
+        "uniqueVideos": int(pending_metadata.get("unique_videos") or 0),
+        "skippedVideos": int(pending_metadata.get("known_videos_skipped") or 0),
+        "newVideos": int(pending_metadata.get("new_videos") or 0) if args.download else None,
+        "retryVideos": int(pending_metadata.get("retry_videos") or 0) if args.download else None,
+        "downloadedVideos": max(0, processed_videos - failed_videos),
+        "failedVideos": failed_videos,
+        "downloadedBytes": int(progress_payload.get("bytesDone") or 0) if isinstance(progress_payload, dict) else 0,
     }
     with RUN_HISTORY.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
