@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef, type FormEvent } from "react";
 
 type ProgressData = {
   stage: string;
@@ -31,6 +31,7 @@ type MonitorData = {
     latestCrawlAt: string | null;
     listingCount: number;
     pagesPerListing: number;
+    sources: Array<{ name: string; url: string }>;
   };
   overview: {
     rawLinks: number;
@@ -158,6 +159,12 @@ export default function Home() {
   const [serviceOnline, setServiceOnline] = useState<boolean | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
   const [taskControlling, setTaskControlling] = useState(false);
+  const [sourceName, setSourceName] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [sourceSaving, setSourceSaving] = useState(false);
+  const [sourceDeleting, setSourceDeleting] = useState("");
+  const [sourceFeedback, setSourceFeedback] = useState("");
+  const [sourceError, setSourceError] = useState("");
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
@@ -246,6 +253,67 @@ export default function Home() {
       setStartingTask(false);
     }
   }, [load]);
+
+  const applySources = useCallback((sources: Array<{ name: string; url: string }>) => {
+    setData((current) => current ? {
+      ...current,
+      source: { ...current.source, sources, listingCount: sources.length },
+    } : current);
+  }, []);
+
+  const addCrawlSource = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSourceSaving(true);
+    setSourceError("");
+    setSourceFeedback("");
+    try {
+      const response = await fetch("/api/sources", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: sourceName, url: sourceUrl }),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string;
+        sources?: Array<{ name: string; url: string }>;
+      };
+      if (!response.ok || !payload.sources) throw new Error(payload.error || "无法添加抓取链接");
+      applySources(payload.sources);
+      setSourceName("");
+      setSourceUrl("");
+      setSourceFeedback("已添加，将在下一次手动任务中生效");
+      window.setTimeout(() => void load(), 150);
+    } catch (err) {
+      setSourceError(err instanceof Error ? err.message : "无法添加抓取链接");
+    } finally {
+      setSourceSaving(false);
+    }
+  }, [applySources, load, sourceName, sourceUrl]);
+
+  const deleteCrawlSource = useCallback(async (source: { name: string; url: string }) => {
+    if (!window.confirm(`删除抓取链接“${source.name}”？\n已下载文件和历史记录不会被删除。`)) return;
+    setSourceDeleting(source.url);
+    setSourceError("");
+    setSourceFeedback("");
+    try {
+      const response = await fetch("/api/sources", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: source.url }),
+      });
+      const payload = await response.json().catch(() => ({})) as {
+        error?: string;
+        sources?: Array<{ name: string; url: string }>;
+      };
+      if (!response.ok || !payload.sources) throw new Error(payload.error || "无法删除抓取链接");
+      applySources(payload.sources);
+      setSourceFeedback(`已删除“${source.name}”，下次任务不再抓取`);
+      window.setTimeout(() => void load(), 150);
+    } catch (err) {
+      setSourceError(err instanceof Error ? err.message : "无法删除抓取链接");
+    } finally {
+      setSourceDeleting("");
+    }
+  }, [applySources, load]);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -437,6 +505,43 @@ export default function Home() {
                   <small>{day.label}</small>
                 </div>
               ))}
+            </div>
+          </section>
+
+          <section className="source-manager" aria-labelledby="source-manager-title">
+            <div className="source-manager-head">
+              <div>
+                <span className="source-manager-kicker"><i />CRAWL SOURCES</span>
+                <h2 id="source-manager-title">抓取链接任务栏</h2>
+                <p>管理下一次手动任务要检查的榜单链接，每个链接抓取前 {data.source.pagesPerListing} 页。</p>
+              </div>
+              <span className={`status ${taskAppearsActive ? "active" : "done"}`}>{taskAppearsActive ? "任务中·已锁定" : `${data.source.sources?.length ?? 0} 个链接`}</span>
+            </div>
+            <form className="source-form" onSubmit={addCrawlSource}>
+              <label>
+                <span>名称（可选）</span>
+                <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} maxLength={40} placeholder="例如：最近热门" disabled={taskAppearsActive || sourceSaving} />
+              </label>
+              <label>
+                <span>HTTPS 榜单链接</span>
+                <input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} required placeholder="https://91porn.com/v.php?category=..." disabled={taskAppearsActive || sourceSaving} />
+              </label>
+              <button className="source-add" type="submit" disabled={taskAppearsActive || sourceSaving || !sourceUrl.trim()}>{sourceSaving ? "正在保存…" : "+ 添加链接"}</button>
+            </form>
+            {sourceFeedback && <p className="source-feedback success" role="status">{sourceFeedback}</p>}
+            {sourceError && <p className="source-feedback error" role="alert">{sourceError}</p>}
+            <div className="source-list" aria-label="已配置抓取链接">
+              {(data.source.sources ?? []).map((source, index) => <article className="source-item" key={source.url}>
+                <span className="source-index">{String(index + 1).padStart(2, "0")}</span>
+                <div className="source-copy"><strong>{source.name}</strong><code title={source.url}>{source.url}</code></div>
+                <button
+                  className="source-delete"
+                  type="button"
+                  onClick={() => void deleteCrawlSource(source)}
+                  disabled={taskAppearsActive || sourceDeleting === source.url || (data.source.sources?.length ?? 0) <= 1}
+                  title={(data.source.sources?.length ?? 0) <= 1 ? "至少保留一个抓取链接" : `删除 ${source.name}`}
+                >{sourceDeleting === source.url ? "删除中…" : "删除"}</button>
+              </article>)}
             </div>
           </section>
 

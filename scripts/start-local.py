@@ -17,15 +17,18 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from source_config import SourceConfigError, add_source, load_source_config, remove_source
 from task_lock import lock_is_active, read_lock, update_lock
 
 PROJECT = Path(__file__).resolve().parents[1]
 REFRESH = PROJECT / "scripts" / "refresh-monitor.py"
+SOURCE_CONFIG = PROJECT / "config" / "daily-sources.json"
 SNAPSHOT_WAKEUP = threading.Event()
 
 class TaskHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     start_guard = threading.Lock()
+    source_guard = threading.Lock()
     start_pending = False
 
     @classmethod
@@ -56,12 +59,44 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def read_json_body(self, maximum: int = 4096) -> dict[str, object]:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError as exc:
+            raise SourceConfigError("请求长度无效") from exc
+        if length <= 0 or length > maximum:
+            raise SourceConfigError("请求内容为空或过大")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise SourceConfigError("请求内容格式无效") from exc
+        if not isinstance(payload, dict):
+            raise SourceConfigError("请求内容格式无效")
+        return payload
+
+    def source_edit_blocked(self) -> bool:
+        return type(self).start_pending or lock_is_active(PROJECT / "data" / ".crawling.lock")
+
     def do_POST(self):
         if self.headers.get("Origin") and not self.allowed_origin():
             self.send_json(403, {"error": "拒绝非本地页面发起任务"})
             return
         request_path = urlsplit(self.path).path
-        if request_path == "/api/task":
+        if request_path == "/api/sources":
+            try:
+                body = self.read_json_body()
+                with self.start_guard:
+                    if self.source_edit_blocked():
+                        self.send_json(409, {"error": "任务运行中，暂时不能修改抓取链接"})
+                        return
+                    with self.source_guard:
+                        sources = add_source(SOURCE_CONFIG, str(body.get("name") or ""), str(body.get("url") or ""))
+            except SourceConfigError as exc:
+                self.send_json(400, {"error": str(exc)})
+                return
+            SNAPSHOT_WAKEUP.set()
+            self.send_json(201, {"success": True, "sources": sources})
+        elif request_path == "/api/task":
             lock_path = PROJECT / "data" / ".crawling.lock"
             with self.start_guard:
                 if type(self).start_pending or lock_is_active(lock_path):
@@ -140,7 +175,14 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         request_path = urlsplit(self.path).path
-        if request_path == "/api/health":
+        if request_path == "/api/sources":
+            try:
+                config = load_source_config(SOURCE_CONFIG)
+            except SourceConfigError as exc:
+                self.send_json(500, {"error": str(exc)})
+                return
+            self.send_json(200, config)
+        elif request_path == "/api/health":
             lock_path = PROJECT / "data" / ".crawling.lock"
             status_path = PROJECT / "public" / "status.json"
             lock_payload = read_lock(lock_path) if lock_is_active(lock_path) else {}
@@ -186,6 +228,27 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_json(404, {"error": "Not found"})
 
+    def do_DELETE(self):
+        if self.headers.get("Origin") and not self.allowed_origin():
+            self.send_json(403, {"error": "拒绝非本地页面修改配置"})
+            return
+        if urlsplit(self.path).path != "/api/sources":
+            self.send_json(404, {"error": "Not found"})
+            return
+        try:
+            body = self.read_json_body()
+            with self.start_guard:
+                if self.source_edit_blocked():
+                    self.send_json(409, {"error": "任务运行中，暂时不能修改抓取链接"})
+                    return
+                with self.source_guard:
+                    sources = remove_source(SOURCE_CONFIG, str(body.get("url") or ""))
+        except SourceConfigError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        SNAPSHOT_WAKEUP.set()
+        self.send_json(200, {"success": True, "sources": sources})
+
     def do_OPTIONS(self):
         origin = self.allowed_origin()
         if self.headers.get("Origin") and not origin:
@@ -195,7 +258,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         if origin:
             self.send_header('Access-Control-Allow-Origin', origin)
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
         self.end_headers()
 
     def log_message(self, format, *args):

@@ -289,6 +289,11 @@ def main() -> int:
             "latestCrawlAt": latest_crawl_at,
             "listingCount": len(configured_sources),
             "pagesPerListing": int(daily_config.get("pagesPerSource") or 2) if isinstance(daily_config, dict) else 2,
+            "sources": [
+                {"name": str(item.get("name") or "未命名"), "url": str(item.get("url"))}
+                for item in configured_sources
+                if isinstance(item, dict) and item.get("url")
+            ],
         },
         "overview": {
             "rawLinks": raw_links,

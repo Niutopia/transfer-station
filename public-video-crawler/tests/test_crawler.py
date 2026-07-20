@@ -20,6 +20,7 @@ sys.path.append(str(Path(__file__).resolve().parents[2] / "scripts"))
 import task_lock
 import task_history
 import progress_history
+import source_config
 
 
 FIXTURE = """
@@ -68,6 +69,43 @@ class FakeResponse:
 
 
 class CrawlerTests(unittest.TestCase):
+    def test_source_config_adds_and_removes_validated_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "daily-sources.json"
+            original = {
+                "pagesPerSource": 2,
+                "sources": [{"name": "hot", "url": "https://91porn.com/v.php?category=hot&viewtype=basic"}],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+
+            sources = source_config.add_source(
+                path,
+                "top",
+                "https://91porn.com/v.php?viewtype=basic&category=top",
+            )
+            self.assertEqual(len(sources), 2)
+            self.assertEqual(sources[-1]["name"], "top")
+            self.assertIn("category=top", sources[-1]["url"])
+
+            remaining = source_config.remove_source(path, sources[-1]["url"])
+            self.assertEqual(remaining, original["sources"])
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["pagesPerSource"], 2)
+
+    def test_source_config_rejects_invalid_duplicate_and_last_removal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "daily-sources.json"
+            path.write_text(json.dumps({
+                "pagesPerSource": 2,
+                "sources": [{"name": "hot", "url": "https://91porn.com/v.php?category=hot&viewtype=basic"}],
+            }), encoding="utf-8")
+
+            with self.assertRaises(source_config.SourceConfigError):
+                source_config.add_source(path, "bad", "https://example.com/v.php?category=hot")
+            with self.assertRaises(source_config.SourceConfigError):
+                source_config.add_source(path, "duplicate", "https://91porn.com/v.php?viewtype=basic&category=hot")
+            with self.assertRaises(source_config.SourceConfigError):
+                source_config.remove_source(path, "https://91porn.com/v.php?category=hot&viewtype=basic")
+
     def test_completed_progress_is_archived_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

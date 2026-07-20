@@ -53,6 +53,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   const dailyConfig = JSON.parse(await readFile(new URL("../config/daily-sources.json", import.meta.url), "utf8"));
   assert.equal(dailyConfig.sources.length, 5);
   assert.equal(new Set(dailyConfig.sources.map((source) => source.url)).size, 5);
+  assert.deepEqual(status.source.sources, dailyConfig.sources);
 });
 
 test("dashboard keeps a single focused monitor and the shared favicon", async () => {
@@ -109,4 +110,23 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /预计剩余/);
   assert.match(source, /断点续传/);
   assert.match(source, /\/api\/task\/control/);
+});
+
+test("crawl sources can be managed safely from the dashboard", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /抓取链接任务栏/);
+  assert.match(source, /fetch\("\/api\/sources"/);
+  assert.match(source, /method: "DELETE"/);
+  assert.match(source, /source-manager/);
+  assert.match(source, /任务中·已锁定/);
+
+  const taskService = await readFile(new URL("../scripts/start-local.py", import.meta.url), "utf8");
+  assert.match(taskService, /add_source/);
+  assert.match(taskService, /remove_source/);
+  assert.match(taskService, /source_edit_blocked/);
+  assert.match(taskService, /do_DELETE/);
+
+  const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
+  assert.match(compose, /\.\/config:\/app\/config\s/);
+  assert.doesNotMatch(compose, /\.\/config:\/app\/config:ro/);
 });
