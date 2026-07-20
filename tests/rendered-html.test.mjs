@@ -60,7 +60,7 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
   assert.doesNotMatch(source, /className="panel run-panel"/);
-  assert.match(source, /!isCrawling && <button/);
+  assert.match(source, /!taskAppearsActive && <button/);
   assert.match(source, /再次抓取最新内容/);
   assert.doesNotMatch(source, /payload\.code === "completed_today"|!completedToday && <button/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
@@ -73,6 +73,7 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(styles, /\.nav(?:\s|\{|:)/);
   const taskService = await readFile(new URL("../scripts/start-local.py", import.meta.url), "utf8");
   assert.match(taskService, /start_pending/);
+  assert.match(taskService, /SNAPSHOT_WAKEUP/);
   assert.doesNotMatch(taskService, /completed_today|daily_task_completed/);
   const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
   assert.match(readme, /项目不会定时抓取/);
@@ -90,6 +91,8 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.doesNotMatch(source, /\{isCrawling && currentProgress && <section className="current-task-panel"/);
   assert.match(source, /等待手动开始任务/);
   assert.match(source, /className="current-task-actions"/);
+  assert.match(source, /taskLaunching/);
+  assert.match(source, /正在准备抓取任务/);
   assert.match(source, /currentProgress/);
   assert.match(source, /lastProgress/);
   assert.match(source, /CURRENT TASK/);

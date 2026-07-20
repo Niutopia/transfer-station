@@ -141,6 +141,7 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [startingTask, setStartingTask] = useState(false);
+  const [taskLaunching, setTaskLaunching] = useState(false);
   const [taskMessage, setTaskMessage] = useState("");
   const [serviceOnline, setServiceOnline] = useState<boolean | null>(null);
   const [realtimeConnected, setRealtimeConnected] = useState(false);
@@ -161,7 +162,9 @@ export default function Home() {
         signal: controller.signal
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setData((await response.json()) as MonitorData);
+      const nextData = (await response.json()) as MonitorData;
+      setData(nextData);
+      if (nextData.latestRun.status === "active") setTaskLaunching(false);
       setError("");
     } catch (err: unknown) {
       if (err instanceof Error && err.name === "AbortError") return;
@@ -206,6 +209,7 @@ export default function Home() {
 
   const startTask = useCallback(async () => {
     setStartingTask(true);
+    setTaskLaunching(true);
     setTaskError("");
     setTaskMessage("");
     try {
@@ -213,15 +217,18 @@ export default function Home() {
       const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
       if (response.status === 409) {
         setTaskMessage("任务已在后台运行，正在同步状态");
+        window.setTimeout(() => setTaskLaunching(false), 8_000);
         await load();
         return;
       }
       if (!response.ok) throw new Error(payload.error || '无法启动任务');
       setServiceOnline(true);
       setTaskMessage("任务已启动，状态会自动更新");
-      window.setTimeout(() => void load(), 500);
+      window.setTimeout(() => void load(), 120);
+      window.setTimeout(() => setTaskLaunching(false), 8_000);
     } catch {
       setServiceOnline(false);
+      setTaskLaunching(false);
       setTaskError("任务服务未连接。历史状态仍可查看，但暂时不能启动新任务。");
     } finally {
       setStartingTask(false);
@@ -248,7 +255,9 @@ export default function Home() {
     };
     source.addEventListener("status", (event) => {
       try {
-        setData(JSON.parse((event as MessageEvent<string>).data) as MonitorData);
+        const nextData = JSON.parse((event as MessageEvent<string>).data) as MonitorData;
+        setData(nextData);
+        if (nextData.latestRun.status === "active") setTaskLaunching(false);
         setError("");
         setRealtimeConnected(true);
       } catch {
@@ -292,6 +301,7 @@ export default function Home() {
   }
 
   const isCrawling = data.latestRun.status === "active";
+  const taskAppearsActive = isCrawling || taskLaunching;
   const completedToday = data.latestRun.completedToday === true;
   const taskReady = !isCrawling && data.overview.resolvedVideos === data.overview.uniqueVideos && data.overview.uniqueVideos > 0;
   const allDownloaded = taskReady && data.overview.pendingVideos === 0 && data.overview.downloadedVideos >= data.overview.uniqueVideos;
@@ -337,7 +347,7 @@ export default function Home() {
           <section className="hero">
             <div>
               <div className="eyebrow">MANUAL QUEST // {fullDate(data.generatedAt)}</div>
-              <h1>{isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : currentProgress?.stage === "downloading" ? `正在下载 ${currentProgress.done}/${currentProgress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "本次采集与下载已完成" : downloading ? "本次采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "采集状态需要检查"}</h1>
+              <h1>{taskLaunching && !isCrawling ? "正在启动抓取任务…" : isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : currentProgress?.stage === "downloading" ? `正在下载 ${currentProgress.done}/${currentProgress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "本次采集与下载已完成" : downloading ? "本次采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "采集状态需要检查"}</h1>
               <p>
                 已配置 {data.source.listingCount} 个榜单 × 每榜前 {data.source.pagesPerListing} 页；
                 {isCrawling ? "状态通过实时连接自动更新，无需手动刷新。" : `最近任务得到 ${data.overview.uniqueVideos} 个唯一视频，`}
@@ -357,16 +367,18 @@ export default function Home() {
             </div>
           </section>
 
-          <section className={`current-task-panel ${isCrawling ? "is-active" : "is-idle"}`} aria-labelledby="current-task-title">
+          <section className={`current-task-panel ${taskAppearsActive ? "is-active" : "is-idle"}`} aria-labelledby="current-task-title">
             <div className="current-task-head">
-              <div><span className="current-kicker"><i />CURRENT TASK</span><h2 id="current-task-title">{isCrawling && currentProgress ? taskPaused ? "任务已暂停" : progressTitle(currentProgress.stage) : "等待手动开始任务"}</h2></div>
+              <div>
+                <div className="current-label-row"><span className="current-kicker"><i />CURRENT TASK</span><span className={`status ${taskAppearsActive ? taskPaused ? "waiting" : "active" : "done"}`}>{taskLaunching && !isCrawling ? "启动中" : isCrawling ? taskPaused ? "已暂停" : "运行中" : "空闲"}</span></div>
+                <h2 id="current-task-title">{taskLaunching && !isCrawling ? "正在准备抓取任务" : isCrawling && currentProgress ? taskPaused ? "任务已暂停" : progressTitle(currentProgress.stage) : "等待手动开始任务"}</h2>
+              </div>
               <div className="current-task-actions">
-                <span className={`status ${isCrawling ? taskPaused ? "waiting" : "active" : "done"}`}>{isCrawling ? taskPaused ? "已暂停" : "运行中" : "空闲"}</span>
                 {isCrawling && data.latestRun.taskControllable && <>
                   <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
                   <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
                 </>}
-                {!isCrawling && <button
+                {!taskAppearsActive && <button
                   className="secondary highlight-btn"
                   type="button"
                   onClick={startTask}
@@ -377,12 +389,12 @@ export default function Home() {
               </div>
             </div>
             <div className="current-task-grid">
-              <span><small>当前阶段</small><strong>{!isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
+              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "任务准备" : !isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
               <span><small>抓取范围</small><strong>{data.source.listingCount} 榜 × {data.source.pagesPerListing} 页</strong></span>
-              <span><small>处理进度</small><strong>{isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个待处理` : "暂无任务"}</strong></span>
-              <span><small>启动时间</small><strong>{isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : "等待手动启动"}</strong></span>
+              <span><small>处理进度</small><strong>{taskLaunching && !isCrawling ? "正在连接" : isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个待处理` : "暂无任务"}</strong></span>
+              <span><small>启动时间</small><strong>{taskLaunching && !isCrawling ? "刚刚" : isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : "等待手动启动"}</strong></span>
             </div>
-            <div className={`current-task-track ${isCrawling && currentProgress?.total === 0 ? "indeterminate" : ""}`} role={isCrawling && (currentProgress?.total ?? 0) > 0 ? "progressbar" : undefined} aria-valuenow={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.done : undefined} aria-valuemin={isCrawling && (currentProgress?.total ?? 0) > 0 ? 0 : undefined} aria-valuemax={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.total : undefined}><i style={isCrawling && (currentProgress?.total ?? 0) > 0 ? { width: `${currentPercent}%` } : { width: "0%" }} /></div>
+            {taskAppearsActive && <div className={`current-task-track ${(taskLaunching || currentProgress?.total === 0) ? "indeterminate" : ""}`} role={isCrawling && (currentProgress?.total ?? 0) > 0 ? "progressbar" : undefined} aria-valuenow={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.done : undefined} aria-valuemin={isCrawling && (currentProgress?.total ?? 0) > 0 ? 0 : undefined} aria-valuemax={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.total : undefined}><i style={isCrawling && (currentProgress?.total ?? 0) > 0 ? { width: `${currentPercent}%` } : undefined} /></div>}
             {isCrawling && currentProgress?.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}
             {isCrawling && currentProgress && (currentProgress.bytesTotalKnown ?? 0) > 0 && <>
               <div className="current-byte-caption"><span>已知字节进度 · {currentProgress.knownItems ?? 0} 个文件</span><strong>{formatBytes(currentProgress.bytesDone ?? 0)} / {formatBytes(currentProgress.bytesTotalKnown ?? 0)}</strong></div>

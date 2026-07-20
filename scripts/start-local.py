@@ -21,6 +21,7 @@ from task_lock import lock_is_active, read_lock, update_lock
 
 PROJECT = Path(__file__).resolve().parents[1]
 REFRESH = PROJECT / "scripts" / "refresh-monitor.py"
+SNAPSHOT_WAKEUP = threading.Event()
 
 class TaskHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -32,6 +33,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
         process.wait()
         with cls.start_guard:
             cls.start_pending = False
+        SNAPSHOT_WAKEUP.set()
 
     def allowed_origin(self) -> str | None:
         origin = self.headers.get("Origin")
@@ -82,6 +84,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                 type(self).start_pending = True
                 threading.Thread(target=self.clear_start_pending_when_done, args=(proc,), daemon=True).start()
                 os.chmod(log_path, 0o600)
+                SNAPSHOT_WAKEUP.set()
             self.send_json(202, {"success": True, "pid": proc.pid})
         elif request_path == "/api/task/control":
             lock_path = PROJECT / "data" / ".crawling.lock"
@@ -130,6 +133,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
             except (ProcessLookupError, PermissionError, OSError):
                 self.send_json(409, {"error": "任务进程已经结束或无法控制"})
                 return
+            SNAPSHOT_WAKEUP.set()
             self.send_json(200, {"success": True, "state": action})
         else:
             self.send_json(404, {"error": "Not found"})
@@ -203,7 +207,7 @@ def watcher(stop: threading.Event) -> None:
     while not stop.is_set():
         subprocess.run([sys.executable, str(REFRESH)], cwd=PROJECT, check=False)
         # Active tasks refresh quickly; terminal progress snapshots stay persistent without causing a busy loop.
-        is_active = lock_is_active(data_dir / ".crawling.lock")
+        is_active = TaskHandler.start_pending or lock_is_active(data_dir / ".crawling.lock")
         if not is_active:
             for name in ("crawl-progress.json", "download-progress.json"):
                 try:
@@ -214,7 +218,8 @@ def watcher(stop: threading.Event) -> None:
                 except (OSError, json.JSONDecodeError, AttributeError):
                     continue
         interval = 1 if is_active else 10
-        stop.wait(interval)
+        SNAPSHOT_WAKEUP.wait(interval)
+        SNAPSHOT_WAKEUP.clear()
 
 
 class TaskServer(socketserver.ThreadingTCPServer):
