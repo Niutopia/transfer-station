@@ -30,9 +30,11 @@ docker compose ps
 docker compose down
 ```
 
-## 每日任务
+## 手动抓取
 
-每日任务读取 `config/daily-sources.json`，当前抓取 5 个榜单的前 2 页。不同榜单及不同页之间统一按 `viewkey` 去重，再与跨日历史索引去重。
+项目不会定时抓取，也不会因为 Docker 启动或页面刷新而自动运行任务。只有点击 Web 页面的抓取按钮，或手动执行下面的命令，才会开始抓取。
+
+抓取任务读取 `config/daily-sources.json`，当前抓取 5 个榜单的前 2 页。不同榜单及不同页之间统一按 `viewkey` 去重，再与跨日历史索引去重。
 
 只抓取和解析公开页面，不下载：
 

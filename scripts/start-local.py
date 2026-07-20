@@ -18,29 +18,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from task_lock import lock_is_active, read_lock, update_lock
-from task_history import latest_successful_daily_run
 
 PROJECT = Path(__file__).resolve().parents[1]
 REFRESH = PROJECT / "scripts" / "refresh-monitor.py"
-
-
-def snapshot_has_pending_work(path: Path) -> bool:
-    try:
-        snapshot = json.loads(path.read_text(encoding="utf-8"))
-        overview = snapshot.get("overview", {})
-        return (
-            int(overview.get("pendingVideos") or 0) > 0
-            or int(overview.get("partialDownloads") or 0) > 0
-            or int(overview.get("resolvedVideos") or 0) < int(overview.get("uniqueVideos") or 0)
-        )
-    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
-        return False
-
-
-def daily_task_completed() -> bool:
-    completed = latest_successful_daily_run(PROJECT / "data" / "run-history.jsonl")
-    return bool(completed) and not snapshot_has_pending_work(PROJECT / "public" / "status.json")
-
 
 class TaskHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -84,9 +64,6 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
             with self.start_guard:
                 if type(self).start_pending or lock_is_active(lock_path):
                     self.send_json(409, {"error": "任务已在后台运行", "code": "task_running"})
-                    return
-                if daily_task_completed():
-                    self.send_json(409, {"error": "今日任务已完成，无需重复运行", "code": "completed_today"})
                     return
                 log_dir = PROJECT / "data" / "logs"
                 log_dir.mkdir(parents=True, exist_ok=True)

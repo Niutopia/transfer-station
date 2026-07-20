@@ -54,8 +54,9 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
   assert.doesNotMatch(source, /className="panel run-panel"/);
-  assert.match(source, /!isCrawling && !completedToday && <button/);
-  assert.match(source, /payload\.code === "completed_today"/);
+  assert.match(source, /!isCrawling && <button/);
+  assert.match(source, /再次抓取最新内容/);
+  assert.doesNotMatch(source, /payload\.code === "completed_today"|!completedToday && <button/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
   assert.match(source, /className="brand-title">TRANSFER STATION/);
   assert.doesNotMatch(source, /className="topbar-title"/);
@@ -64,6 +65,11 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.match(styles, /\.hero-actions\s*\{[^}]*flex-wrap:\s*nowrap/);
   assert.match(styles, /\.topbar\s*\{[^}]*grid-template-columns:\s*1fr auto/);
   assert.doesNotMatch(styles, /\.nav(?:\s|\{|:)/);
+  const taskService = await readFile(new URL("../scripts/start-local.py", import.meta.url), "utf8");
+  assert.match(taskService, /start_pending/);
+  assert.doesNotMatch(taskService, /completed_today|daily_task_completed/);
+  const readme = await readFile(new URL("../README.md", import.meta.url), "utf8");
+  assert.match(readme, /项目不会定时抓取/);
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.equal((layout.match(/transfer-station-x\.svg\?v=1/g) ?? []).length, 3);
 });

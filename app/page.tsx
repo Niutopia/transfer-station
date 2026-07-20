@@ -206,7 +206,7 @@ export default function Home() {
       const response = await fetch('/api/task', { method: 'POST' });
       const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
       if (response.status === 409) {
-        setTaskMessage(payload.code === "completed_today" ? "今日任务已完成，无需重复运行" : "任务已在后台运行，正在同步状态");
+        setTaskMessage("任务已在后台运行，正在同步状态");
         await load();
         return;
       }
@@ -327,8 +327,8 @@ export default function Home() {
         <section className="main-column" aria-label="今日概览">
           <section className="hero">
             <div>
-              <div className="eyebrow">DAILY QUEST // {fullDate(data.generatedAt)}</div>
-              <h1>{isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : data.progress?.stage === "downloading" ? `正在下载 ${data.progress.done}/${data.progress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "每日采集与下载已完成" : downloading ? "每日采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "今日采集需要检查"}</h1>
+              <div className="eyebrow">MANUAL QUEST // {fullDate(data.generatedAt)}</div>
+              <h1>{isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : data.progress?.stage === "downloading" ? `正在下载 ${data.progress.done}/${data.progress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "本次采集与下载已完成" : downloading ? "本次采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "采集状态需要检查"}</h1>
               <p>
                 已配置 {data.source.listingCount} 个榜单 × 每榜前 {data.source.pagesPerListing} 页；
                 {isCrawling ? "状态通过实时连接自动更新，无需手动刷新。" : `最近任务得到 ${data.overview.uniqueVideos} 个唯一视频，`}
@@ -346,13 +346,13 @@ export default function Home() {
                 <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
                 <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
               </>}
-              {!isCrawling && !completedToday && <button
+              {!isCrawling && <button
                 className="secondary highlight-btn"
                 type="button"
                 onClick={startTask}
                 disabled={startingTask || serviceOnline === false}
               >
-                {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : "立即开始今日任务"}
+                {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
               </button>}
               <button className="primary" type="button" onClick={() => void load()} disabled={refreshing}>
                 {refreshing ? "正在刷新" : "刷新状态"}
