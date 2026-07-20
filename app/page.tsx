@@ -369,24 +369,24 @@ export default function Home() {
             </div>
           </section>
 
-          {isCrawling && currentProgress && <section className="current-task-panel" aria-labelledby="current-task-title">
+          <section className={`current-task-panel ${isCrawling ? "is-active" : "is-idle"}`} aria-labelledby="current-task-title">
             <div className="current-task-head">
-              <div><span className="current-kicker"><i />CURRENT TASK</span><h2 id="current-task-title">{taskPaused ? "任务已暂停" : progressTitle(currentProgress.stage)}</h2></div>
-              <span className={`status ${taskPaused ? "waiting" : "active"}`}>{taskPaused ? "已暂停" : "运行中"}</span>
+              <div><span className="current-kicker"><i />CURRENT TASK</span><h2 id="current-task-title">{isCrawling && currentProgress ? taskPaused ? "任务已暂停" : progressTitle(currentProgress.stage) : "等待手动开始任务"}</h2></div>
+              <span className={`status ${isCrawling ? taskPaused ? "waiting" : "active" : "done"}`}>{isCrawling ? taskPaused ? "已暂停" : "运行中" : "空闲"}</span>
             </div>
             <div className="current-task-grid">
-              <span><small>当前阶段</small><strong>{currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
+              <span><small>当前阶段</small><strong>{!isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
               <span><small>抓取范围</small><strong>{data.source.listingCount} 榜 × {data.source.pagesPerListing} 页</strong></span>
-              <span><small>处理进度</small><strong>{currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中"}</strong></span>
-              <span><small>启动时间</small><strong>{clock(currentProgress.startedAt ?? data.latestRun.startedAt)}</strong></span>
+              <span><small>处理进度</small><strong>{isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个待处理` : "暂无任务"}</strong></span>
+              <span><small>启动时间</small><strong>{isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : "等待手动启动"}</strong></span>
             </div>
-            <div className={`current-task-track ${currentProgress.total > 0 ? "" : "indeterminate"}`} role={currentProgress.total > 0 ? "progressbar" : undefined} aria-valuenow={currentProgress.total > 0 ? currentProgress.done : undefined} aria-valuemin={currentProgress.total > 0 ? 0 : undefined} aria-valuemax={currentProgress.total > 0 ? currentProgress.total : undefined}><i style={currentProgress.total > 0 ? { width: `${currentPercent}%` } : undefined} /></div>
-            {currentProgress.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}
-            {(currentProgress.bytesTotalKnown ?? 0) > 0 && <>
+            <div className={`current-task-track ${isCrawling && currentProgress?.total === 0 ? "indeterminate" : ""}`} role={isCrawling && (currentProgress?.total ?? 0) > 0 ? "progressbar" : undefined} aria-valuenow={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.done : undefined} aria-valuemin={isCrawling && (currentProgress?.total ?? 0) > 0 ? 0 : undefined} aria-valuemax={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.total : undefined}><i style={isCrawling && (currentProgress?.total ?? 0) > 0 ? { width: `${currentPercent}%` } : { width: "0%" }} /></div>
+            {isCrawling && currentProgress?.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}
+            {isCrawling && currentProgress && (currentProgress.bytesTotalKnown ?? 0) > 0 && <>
               <div className="current-byte-caption"><span>已知字节进度 · {currentProgress.knownItems ?? 0} 个文件</span><strong>{formatBytes(currentProgress.bytesDone ?? 0)} / {formatBytes(currentProgress.bytesTotalKnown ?? 0)}</strong></div>
               <div className="current-task-track byte-track" role="progressbar" aria-label="当前任务已知字节进度" aria-valuenow={currentKnownBytePercent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${currentKnownBytePercent}%` }} /></div>
             </>}
-            {data.activeDownloads.length > 0 && <div className="live-download-list current-download-list">
+            {isCrawling && data.activeDownloads.length > 0 && <div className="live-download-list current-download-list">
               {data.activeDownloads.map((item) => {
                 const itemPercent = item.progressPercent ?? 0;
                 return <div className="live-download" key={item.fileName}>
@@ -396,7 +396,7 @@ export default function Home() {
                 </div>;
               })}
             </div>}
-          </section>}
+          </section>
 
           {lastProgress && lastProgress.total > 0 && <section className={`live-task-panel stage-${lastProgress.stage}`} aria-labelledby="last-task-title">
             <div className="live-task-head">

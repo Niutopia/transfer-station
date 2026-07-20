@@ -286,6 +286,10 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
   background: var(--surface);
   box-shadow: var(--shadow-lg);
 }
+.current-task-panel.is-idle { border-left-color: var(--line-soft); }
+.current-task-panel.is-idle .current-kicker { color: var(--muted); }
+.current-task-panel.is-idle .current-kicker i { background: var(--line-soft); animation: none; }
+.current-task-panel.is-idle .current-task-track { background: var(--surface-soft); }
 .current-task-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .current-task-head h2 { margin: 6px 0 0; font-size: 18px; }
 .current-kicker { display: inline-flex; align-items: center; gap: 8px; color: var(--accent-dark); font-family: var(--font-geist-mono), "SFMono-Regular", Menlo, Monaco, monospace; font-size: 10px; font-weight: 900; letter-spacing: .08em; }
