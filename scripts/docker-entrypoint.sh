@@ -1,5 +1,5 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 python3 scripts/start-local.py --services-only &
 monitor_pid=$!

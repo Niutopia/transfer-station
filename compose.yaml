@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     image: transfer-station:local
     container_name: transfer-station
+    init: true
     ports:
       - "127.0.0.1:3000:3000"
     environment:

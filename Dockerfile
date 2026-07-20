@@ -1,20 +1,6 @@
-FROM python:3.12-bookworm AS node-base
+FROM node:22.19.0-bookworm-slim AS node-base
 
-ARG NODE_VERSION=22.19.0
-ARG TARGETARCH
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
-    && case "$TARGETARCH" in \
-         amd64) node_arch="x64" ;; \
-         arm64) node_arch="arm64" ;; \
-         *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
-       esac \
-    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz" \
-       | tar -xJ -C /usr/local --strip-components=1 \
-    && node --version \
-    && npm --version \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.12-bookworm AS python-base
 
 FROM node-base AS build
 
@@ -24,11 +10,13 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM node-base AS runtime
+FROM nginx:stable-bookworm AS runtime
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nginx tini \
-    && rm -rf /var/lib/apt/lists/*
+COPY --from=python-base /usr/local /usr/local
+COPY --from=node-base /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-base /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 WORKDIR /app
 ENV NODE_ENV=production \
@@ -44,5 +32,4 @@ RUN chmod +x /app/scripts/docker-entrypoint.sh \
 
 EXPOSE 3000
 
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/app/scripts/docker-entrypoint.sh"]
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
