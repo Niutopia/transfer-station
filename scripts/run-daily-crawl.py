@@ -12,7 +12,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from task_lock import TaskLock
+from progress_history import archive_completed_progress
+from task_lock import TaskLock, update_lock
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -76,6 +77,11 @@ def main() -> int:
     download_code = None
     pending_payload = {}
     try:
+        archive_completed_progress(
+            DATA / "download-progress.json",
+            DATA / "last-completed-progress.json",
+        )
+        update_lock(lock_file, phase="crawling")
         crawl_code = run_logged(crawl_command, log_path)
         if crawl_code == 0 and args.download:
             STAGING.mkdir(parents=True, exist_ok=True)
@@ -84,6 +90,7 @@ def main() -> int:
             pending_videos = pending_payload.get("videos") if isinstance(pending_payload, dict) else []
             download_log = DATA / "logs" / f"download-{stamp}.log"
             if isinstance(pending_videos, list) and pending_videos:
+                update_lock(lock_file, phase="downloading")
                 download_command = [
                     sys.executable, "download.py", str(pending_path), "--output-dir", str(STAGING),
                     "--manifest", str(DATA / "download-manifest.json"),
@@ -100,6 +107,7 @@ def main() -> int:
                     download_command += ["--limit", str(args.limit)]
                 download_code = run_logged(download_command, download_log)
             else:
+                update_lock(lock_file, phase="finalizing")
                 download_log.write_text("no new or retry videos\n", encoding="utf-8")
                 os.chmod(download_log, 0o600)
                 download_code = 0

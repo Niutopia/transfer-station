@@ -19,6 +19,7 @@ import download
 sys.path.append(str(Path(__file__).resolve().parents[2] / "scripts"))
 import task_lock
 import task_history
+import progress_history
 
 
 FIXTURE = """
@@ -67,6 +68,19 @@ class FakeResponse:
 
 
 class CrawlerTests(unittest.TestCase):
+    def test_completed_progress_is_archived_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "download-progress.json"
+            destination = root / "last-completed-progress.json"
+            source.write_text(json.dumps({"stage": "complete", "done": 3, "total": 3}), encoding="utf-8")
+            self.assertTrue(progress_history.archive_completed_progress(source, destination))
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["done"], 3)
+
+            source.write_text(json.dumps({"stage": "downloading", "done": 1, "total": 3}), encoding="utf-8")
+            self.assertFalse(progress_history.archive_completed_progress(source, destination))
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["done"], 3)
+
     def test_parser_deduplicates_and_prefers_visible_card(self) -> None:
         videos = crawler.parse_listing(FIXTURE, crawler.DEFAULT_URL, 1)
         by_key = {video.viewkey: video for video in videos}

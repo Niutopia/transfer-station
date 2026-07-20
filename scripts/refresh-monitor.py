@@ -26,6 +26,7 @@ OUTPUT = PROJECT / "public" / "status.json"
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
 STAGING_CACHE = DATA / "staging-index-cache.json"
 RUN_HISTORY = DATA / "run-history.jsonl"
+LAST_COMPLETED_PROGRESS = DATA / "last-completed-progress.json"
 
 
 def iso_from_timestamp(value: float) -> str:
@@ -37,6 +38,25 @@ def load_json(path: Path, fallback):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return fallback
+
+
+def serialize_download_progress(progress):
+    if not isinstance(progress, dict):
+        return None
+    return {
+        "stage": progress.get("stage", "downloading"),
+        "done": int(progress.get("done", 0)),
+        "total": int(progress.get("total", 0)),
+        "active": progress.get("active", []),
+        "bytesDone": int(progress.get("bytesDone", 0)),
+        "bytesTotalKnown": int(progress.get("bytesTotalKnown", 0)),
+        "knownItems": int(progress.get("knownItems", 0)),
+        "failed": int(progress.get("failed", 0)),
+        "speedBytesS": float(progress.get("speedBytesS", 0)),
+        "etaSeconds": progress.get("etaSeconds"),
+        "startedAt": progress.get("startedAt"),
+        "updatedAt": progress.get("updatedAt"),
+    }
 
 
 def scan_files():
@@ -310,27 +330,38 @@ def main() -> int:
         "activeDownloads": active_downloads,
         "pendingDownloads": pending_downloads[:50],
     }
-    # Read crawl / download progress files
+    # Keep the current task separate from the most recent completed download.
     crawl_progress = load_json(DATA / "crawl-progress.json", None)
-    progress = None
-    if crawl_progress and isinstance(crawl_progress, dict):
-        progress = {"stage": crawl_progress.get("stage", "resolving"), "done": int(crawl_progress.get("done", 0)), "total": int(crawl_progress.get("total", 0))}
-    elif download_progress and isinstance(download_progress, dict):
-        progress = {
-            "stage": download_progress.get("stage", "downloading"),
-            "done": int(download_progress.get("done", 0)),
-            "total": int(download_progress.get("total", 0)),
-            "active": download_progress.get("active", []),
-            "bytesDone": int(download_progress.get("bytesDone", 0)),
-            "bytesTotalKnown": int(download_progress.get("bytesTotalKnown", 0)),
-            "knownItems": int(download_progress.get("knownItems", 0)),
-            "failed": int(download_progress.get("failed", 0)),
-            "speedBytesS": float(download_progress.get("speedBytesS", 0)),
-            "etaSeconds": download_progress.get("etaSeconds"),
-            "startedAt": download_progress.get("startedAt"),
-            "updatedAt": download_progress.get("updatedAt"),
-        }
-    payload["progress"] = progress
+    current_progress = None
+    if is_crawling:
+        if isinstance(crawl_progress, dict) and crawl_progress.get("stage") not in {"failed", "cancelled"}:
+            current_progress = {
+                "stage": crawl_progress.get("stage", "resolving"),
+                "done": int(crawl_progress.get("done", 0)),
+                "total": int(crawl_progress.get("total", 0)),
+            }
+        elif isinstance(download_progress, dict) and download_progress.get("stage") not in {"complete", "failed", "cancelled"}:
+            current_progress = serialize_download_progress(download_progress)
+        else:
+            current_progress = {
+                "stage": str(lock_payload.get("phase") or "crawling"),
+                "done": 0,
+                "total": 0,
+                "startedAt": lock_payload.get("startedAt"),
+            }
+
+    last_progress_payload = None
+    if isinstance(download_progress, dict) and download_progress.get("stage") == "complete" and int(download_progress.get("total") or 0) > 0:
+        last_progress_payload = download_progress
+    else:
+        archived_progress = load_json(LAST_COMPLETED_PROGRESS, None)
+        if isinstance(archived_progress, dict) and archived_progress.get("stage") == "complete":
+            last_progress_payload = archived_progress
+    last_progress = serialize_download_progress(last_progress_payload)
+
+    payload["currentProgress"] = current_progress
+    payload["lastProgress"] = last_progress
+    payload["progress"] = current_progress if is_crawling else last_progress
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     temporary = OUTPUT.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

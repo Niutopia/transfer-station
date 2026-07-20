@@ -33,6 +33,12 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(status.overview.rawLinks - status.overview.uniqueVideos, status.overview.duplicatesRemoved);
   assert.equal(status.daily.length, 14);
   assert.equal(Array.isArray(status.recentFiles), true);
+  assert.equal(Object.hasOwn(status, "currentProgress"), true);
+  assert.equal(Object.hasOwn(status, "lastProgress"), true);
+  if (status.lastProgress) {
+    assert.equal(status.lastProgress.stage, "complete");
+    assert.equal(status.lastProgress.done, status.lastProgress.total);
+  }
   if (status.latestRun.status !== "active") {
     assert.equal(status.activeDownloads.length, 0);
     if (status.overview.partialDownloads > 0) {
@@ -80,6 +86,11 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /实时更新中/);
   assert.match(source, /已降级为 10 秒轮询/);
   assert.match(source, /live-task-panel/);
+  assert.match(source, /current-task-panel/);
+  assert.match(source, /currentProgress/);
+  assert.match(source, /lastProgress/);
+  assert.match(source, /CURRENT TASK/);
+  assert.match(source, /LAST TASK/);
   assert.match(source, /speedBytesS/);
   assert.match(source, /已知字节进度/);
   assert.match(source, /预计剩余/);

@@ -2,6 +2,27 @@
 
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 
+type ProgressData = {
+  stage: string;
+  done: number;
+  total: number;
+  active?: Array<{
+    viewkey: string;
+    fileName: string;
+    bytesDone: number;
+    bytesTotal: number;
+    speedBytesS: number;
+  }>;
+  bytesDone?: number;
+  bytesTotalKnown?: number;
+  knownItems?: number;
+  failed?: number;
+  speedBytesS?: number;
+  etaSeconds?: number | null;
+  startedAt?: string | null;
+  updatedAt?: string | null;
+};
+
 type MonitorData = {
   generatedAt: string;
   source: {
@@ -44,26 +65,9 @@ type MonitorData = {
     resumed?: boolean;
     status: "downloading" | "resuming" | "retrying" | "refreshing" | "verifying" | "restarting";
   }>;
-  progress?: {
-    stage: string;
-    done: number;
-    total: number;
-    active?: Array<{
-      viewkey: string;
-      fileName: string;
-      bytesDone: number;
-      bytesTotal: number;
-      speedBytesS: number;
-    }>;
-    bytesDone?: number;
-    bytesTotalKnown?: number;
-    knownItems?: number;
-    failed?: number;
-    speedBytesS?: number;
-    etaSeconds?: number | null;
-    startedAt?: string | null;
-    updatedAt?: string | null;
-  } | null;
+  progress?: ProgressData | null;
+  currentProgress?: ProgressData | null;
+  lastProgress?: ProgressData | null;
 };
 
 const nf = new Intl.NumberFormat("zh-CN");
@@ -122,7 +126,9 @@ function downloadStateLabel(state: MonitorData["activeDownloads"][number]["statu
 }
 
 function progressTitle(stage: string) {
+  if (stage === "crawling") return "正在抓取榜单页面";
   if (stage === "resolving") return "正在解析媒体地址";
+  if (stage === "finalizing") return "正在整理任务结果";
   if (stage === "complete") return "下载任务已完成";
   if (stage === "failed") return "任务需要处理";
   if (stage === "cancelled") return "任务已取消";
@@ -291,10 +297,13 @@ export default function Home() {
   const allDownloaded = taskReady && data.overview.pendingVideos === 0 && data.overview.downloadedVideos >= data.overview.uniqueVideos;
   const downloading = taskReady && !allDownloaded && data.overview.partialDownloads > 0;
   const unresolvedVideos = Math.max(0, data.overview.uniqueVideos - data.overview.resolvedVideos);
-  const progressPercent = data.progress?.total ? Math.min(100, data.progress.done / data.progress.total * 100) : 0;
+  const currentProgress = data.currentProgress ?? (isCrawling ? data.progress : null);
+  const lastProgress = data.lastProgress ?? (!isCrawling ? data.progress : null);
+  const currentPercent = currentProgress?.total ? Math.min(100, currentProgress.done / currentProgress.total * 100) : 0;
+  const lastProgressPercent = lastProgress?.total ? Math.min(100, lastProgress.done / lastProgress.total * 100) : 0;
   const aggregateSpeed = data.activeDownloads.reduce((total, item) => total + (item.speedBytesS ?? 0), 0);
-  const knownBytePercent = data.progress?.bytesTotalKnown ? Math.min(100, (data.progress.bytesDone ?? 0) / data.progress.bytesTotalKnown * 100) : 0;
-  const progressIsActive = Boolean(data.progress && !["complete", "failed", "cancelled"].includes(data.progress.stage));
+  const currentKnownBytePercent = currentProgress?.bytesTotalKnown ? Math.min(100, (currentProgress.bytesDone ?? 0) / currentProgress.bytesTotalKnown * 100) : 0;
+  const lastKnownBytePercent = lastProgress?.bytesTotalKnown ? Math.min(100, (lastProgress.bytesDone ?? 0) / lastProgress.bytesTotalKnown * 100) : 0;
   const taskPaused = data.latestRun.taskState === "paused";
   return (
     <main className="app-shell">
@@ -328,7 +337,7 @@ export default function Home() {
           <section className="hero">
             <div>
               <div className="eyebrow">MANUAL QUEST // {fullDate(data.generatedAt)}</div>
-              <h1>{isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : data.progress?.stage === "downloading" ? `正在下载 ${data.progress.done}/${data.progress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "本次采集与下载已完成" : downloading ? "本次采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "采集状态需要检查"}</h1>
+              <h1>{isCrawling ? taskPaused ? "任务已暂停，进度已安全保存" : currentProgress?.stage === "downloading" ? `正在下载 ${currentProgress.done}/${currentProgress.total}` : "正在抓取和解析媒体地址…" : allDownloaded ? "本次采集与下载已完成" : downloading ? "本次采集已完成，正在下载中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个文件等待处理` : "采集状态需要检查"}</h1>
               <p>
                 已配置 {data.source.listingCount} 个榜单 × 每榜前 {data.source.pagesPerListing} 页；
                 {isCrawling ? "状态通过实时连接自动更新，无需手动刷新。" : `最近任务得到 ${data.overview.uniqueVideos} 个唯一视频，`}
@@ -360,24 +369,24 @@ export default function Home() {
             </div>
           </section>
 
-          {data.progress && data.progress.total > 0 && <section className={`live-task-panel stage-${data.progress.stage}`} aria-labelledby="live-task-title">
-            <div className="live-task-head">
-              <div><span className="live-kicker"><i />{progressIsActive ? "LIVE TASK" : "LAST TASK"}</span><h2 id="live-task-title">{progressTitle(data.progress.stage)}</h2></div>
-              <strong>{progressPercent.toFixed(0)}%</strong>
+          {isCrawling && currentProgress && <section className="current-task-panel" aria-labelledby="current-task-title">
+            <div className="current-task-head">
+              <div><span className="current-kicker"><i />CURRENT TASK</span><h2 id="current-task-title">{taskPaused ? "任务已暂停" : progressTitle(currentProgress.stage)}</h2></div>
+              <span className={`status ${taskPaused ? "waiting" : "active"}`}>{taskPaused ? "已暂停" : "运行中"}</span>
             </div>
-            <div className="progress-caption"><span>文件进度</span><strong>{data.progress.done}/{data.progress.total}</strong></div>
-            <div className="live-progress" role="progressbar" aria-valuenow={data.progress.done} aria-valuemin={0} aria-valuemax={data.progress.total}><i style={{ width: `${progressPercent}%` }} /></div>
-            {(data.progress.bytesTotalKnown ?? 0) > 0 && <>
-              <div className="progress-caption byte-caption"><span>已知字节进度 · {data.progress.knownItems ?? 0} 个文件</span><strong>{formatBytes(data.progress.bytesDone ?? 0)} / {formatBytes(data.progress.bytesTotalKnown ?? 0)}</strong></div>
-              <div className="live-progress byte-progress" role="progressbar" aria-label="已知字节下载进度" aria-valuenow={knownBytePercent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${knownBytePercent}%` }} /></div>
+            <div className="current-task-grid">
+              <span><small>当前阶段</small><strong>{currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
+              <span><small>抓取范围</small><strong>{data.source.listingCount} 榜 × {data.source.pagesPerListing} 页</strong></span>
+              <span><small>处理进度</small><strong>{currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中"}</strong></span>
+              <span><small>启动时间</small><strong>{clock(currentProgress.startedAt ?? data.latestRun.startedAt)}</strong></span>
+            </div>
+            <div className={`current-task-track ${currentProgress.total > 0 ? "" : "indeterminate"}`} role={currentProgress.total > 0 ? "progressbar" : undefined} aria-valuenow={currentProgress.total > 0 ? currentProgress.done : undefined} aria-valuemin={currentProgress.total > 0 ? 0 : undefined} aria-valuemax={currentProgress.total > 0 ? currentProgress.total : undefined}><i style={currentProgress.total > 0 ? { width: `${currentPercent}%` } : undefined} /></div>
+            {currentProgress.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}
+            {(currentProgress.bytesTotalKnown ?? 0) > 0 && <>
+              <div className="current-byte-caption"><span>已知字节进度 · {currentProgress.knownItems ?? 0} 个文件</span><strong>{formatBytes(currentProgress.bytesDone ?? 0)} / {formatBytes(currentProgress.bytesTotalKnown ?? 0)}</strong></div>
+              <div className="current-task-track byte-track" role="progressbar" aria-label="当前任务已知字节进度" aria-valuenow={currentKnownBytePercent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${currentKnownBytePercent}%` }} /></div>
             </>}
-            <div className="live-stats">
-              <span><small>已完成</small><strong>{data.progress.done}/{data.progress.total}</strong></span>
-              <span><small>活动下载</small><strong>{data.activeDownloads.length}</strong></span>
-              <span><small>实时速度</small><strong>{formatBytes(data.progress.speedBytesS ?? aggregateSpeed)}/s</strong></span>
-              <span><small>{data.progress.failed ? "失败项目" : progressIsActive ? "预计剩余" : "任务结果"}</small><strong>{data.progress.failed ? data.progress.failed : progressIsActive ? formatDuration(data.progress.etaSeconds) : "已完成"}</strong></span>
-            </div>
-            {data.activeDownloads.length > 0 && <div className="live-download-list">
+            {data.activeDownloads.length > 0 && <div className="live-download-list current-download-list">
               {data.activeDownloads.map((item) => {
                 const itemPercent = item.progressPercent ?? 0;
                 return <div className="live-download" key={item.fileName}>
@@ -387,6 +396,25 @@ export default function Home() {
                 </div>;
               })}
             </div>}
+          </section>}
+
+          {lastProgress && lastProgress.total > 0 && <section className={`live-task-panel stage-${lastProgress.stage}`} aria-labelledby="last-task-title">
+            <div className="live-task-head">
+              <div><span className="live-kicker"><i />LAST TASK</span><h2 id="last-task-title">{progressTitle(lastProgress.stage)}</h2></div>
+              <strong>{lastProgressPercent.toFixed(0)}%</strong>
+            </div>
+            <div className="progress-caption"><span>文件进度</span><strong>{lastProgress.done}/{lastProgress.total}</strong></div>
+            <div className="live-progress" role="progressbar" aria-valuenow={lastProgress.done} aria-valuemin={0} aria-valuemax={lastProgress.total}><i style={{ width: `${lastProgressPercent}%` }} /></div>
+            {(lastProgress.bytesTotalKnown ?? 0) > 0 && <>
+              <div className="progress-caption byte-caption"><span>已知字节进度 · {lastProgress.knownItems ?? 0} 个文件</span><strong>{formatBytes(lastProgress.bytesDone ?? 0)} / {formatBytes(lastProgress.bytesTotalKnown ?? 0)}</strong></div>
+              <div className="live-progress byte-progress" role="progressbar" aria-label="上一任务已知字节进度" aria-valuenow={lastKnownBytePercent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${lastKnownBytePercent}%` }} /></div>
+            </>}
+            <div className="live-stats">
+              <span><small>已完成</small><strong>{lastProgress.done}/{lastProgress.total}</strong></span>
+              <span><small>任务耗时</small><strong>{lastProgress.startedAt && lastProgress.updatedAt ? formatDuration((new Date(lastProgress.updatedAt).getTime() - new Date(lastProgress.startedAt).getTime()) / 1000) : "已记录"}</strong></span>
+              <span><small>下载容量</small><strong>{formatBytes(lastProgress.bytesDone ?? 0)}</strong></span>
+              <span><small>任务结果</small><strong>已完成</strong></span>
+            </div>
           </section>}
 
           <section className="panel trend-panel" aria-labelledby="trend-title">
