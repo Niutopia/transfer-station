@@ -56,8 +56,11 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(source, /className="panel run-panel"/);
   assert.match(source, /\{!isCrawling && <button/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
+  assert.match(source, /className="topbar-title">TRANSFER STATION/);
+  assert.doesNotMatch(source, /LOCAL MEDIA NODE|className="brand-text"/);
   const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
   assert.match(styles, /\.hero-actions\s*\{[^}]*flex-wrap:\s*nowrap/);
+  assert.match(styles, /\.topbar\s*\{[^}]*grid-template-columns:\s*1fr auto 1fr/);
   assert.doesNotMatch(styles, /\.nav(?:\s|\{|:)/);
   const layout = await readFile(new URL("../app/layout.tsx", import.meta.url), "utf8");
   assert.equal((layout.match(/transfer-station-x\.svg\?v=1/g) ?? []).length, 3);
