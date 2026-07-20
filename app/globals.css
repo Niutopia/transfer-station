@@ -399,10 +399,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 
 .side-column { position: sticky; top: 20px; display: grid; gap: 17px; }
 .side-card { padding: 18px; border: 2px solid var(--line); background: var(--surface); box-shadow: var(--shadow); }
-.side-card.compact { display: grid; gap: 6px; border-left: 8px solid var(--amber); }
-.side-card.compact > strong { font-size: 17px; }
-.side-card.compact p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
-.side-label { color: var(--muted); font-size: 10px; font-weight: 900; }
 .side-card-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
 .side-card-head div { display: grid; gap: 5px; }
 .side-card-head span { color: var(--muted); font-size: 10px; }

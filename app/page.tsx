@@ -532,10 +532,6 @@ export default function Home() {
             <div className="side-title"><h2>运行状态</h2><span className={`status ${data.latestRun.status === "active" ? "active" : data.latestRun.status === "attention" ? "attention" : "done"}`}>{data.latestRun.status === "active" ? "运行中" : data.latestRun.status === "attention" ? "需检查" : "就绪"}</span></div>
             <div className="alert-list">{data.alerts.map((alert, index) => <div className={`alert-item ${alert.level}`} key={`${alert.title}-${index}`}><span aria-hidden="true" /><div><strong>{alert.title}</strong><p>{alert.detail}</p></div></div>)}</div>
           </section>
-          <section className="side-card compact">
-            <span className="side-label">最近抓取</span><strong>{clock(data.source.latestCrawlAt)}</strong>
-            <p>{data.source.listingCount} 个榜单，每榜 {data.source.pagesPerListing} 页</p>
-          </section>
         </aside>
       </div>
     </main>
