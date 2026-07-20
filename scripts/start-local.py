@@ -18,13 +18,40 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from task_lock import lock_is_active, read_lock, update_lock
+from task_history import latest_successful_daily_run
 
 PROJECT = Path(__file__).resolve().parents[1]
 REFRESH = PROJECT / "scripts" / "refresh-monitor.py"
 
 
+def snapshot_has_pending_work(path: Path) -> bool:
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+        overview = snapshot.get("overview", {})
+        return (
+            int(overview.get("pendingVideos") or 0) > 0
+            or int(overview.get("partialDownloads") or 0) > 0
+            or int(overview.get("resolvedVideos") or 0) < int(overview.get("uniqueVideos") or 0)
+        )
+    except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def daily_task_completed() -> bool:
+    completed = latest_successful_daily_run(PROJECT / "data" / "run-history.jsonl")
+    return bool(completed) and not snapshot_has_pending_work(PROJECT / "public" / "status.json")
+
+
 class TaskHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    start_guard = threading.Lock()
+    start_pending = False
+
+    @classmethod
+    def clear_start_pending_when_done(cls, process: subprocess.Popen) -> None:
+        process.wait()
+        with cls.start_guard:
+            cls.start_pending = False
 
     def allowed_origin(self) -> str | None:
         origin = self.headers.get("Origin")
@@ -54,24 +81,30 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
         request_path = urlsplit(self.path).path
         if request_path == "/api/task":
             lock_path = PROJECT / "data" / ".crawling.lock"
-            if lock_is_active(lock_path):
-                self.send_json(409, {"error": "今日任务已在运行"})
-                return
-            log_dir = PROJECT / "data" / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-            log_path = log_dir / f"api-task-{stamp}.log"
-            try:
-                with log_path.open("w") as log_file:
-                    proc = subprocess.Popen(
-                        [sys.executable, str(PROJECT / "scripts" / "run-daily-crawl.py"), "--download"],
-                        cwd=PROJECT, start_new_session=True,
-                        stdout=log_file, stderr=subprocess.STDOUT,
-                    )
-            except OSError:
-                self.send_json(500, {"error": "无法启动今日任务"})
-                return
-            os.chmod(log_path, 0o600)
+            with self.start_guard:
+                if type(self).start_pending or lock_is_active(lock_path):
+                    self.send_json(409, {"error": "任务已在后台运行", "code": "task_running"})
+                    return
+                if daily_task_completed():
+                    self.send_json(409, {"error": "今日任务已完成，无需重复运行", "code": "completed_today"})
+                    return
+                log_dir = PROJECT / "data" / "logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+                log_path = log_dir / f"api-task-{stamp}.log"
+                try:
+                    with log_path.open("w") as log_file:
+                        proc = subprocess.Popen(
+                            [sys.executable, str(PROJECT / "scripts" / "run-daily-crawl.py"), "--download"],
+                            cwd=PROJECT, start_new_session=True,
+                            stdout=log_file, stderr=subprocess.STDOUT,
+                        )
+                except OSError:
+                    self.send_json(500, {"error": "无法启动今日任务"})
+                    return
+                type(self).start_pending = True
+                threading.Thread(target=self.clear_start_pending_when_done, args=(proc,), daemon=True).start()
+                os.chmod(log_path, 0o600)
             self.send_json(202, {"success": True, "pid": proc.pid})
         elif request_path == "/api/task/control":
             lock_path = PROJECT / "data" / ".crawling.lock"

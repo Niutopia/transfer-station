@@ -27,7 +27,7 @@ type MonitorData = {
   };
   storage: { usedBytes: number; diskFreeBytes: number; diskTotalBytes: number; diskUsedPercent: number };
   daily: Array<{ date: string; label: string; files: number; bytes: number }>;
-  latestRun: { status: "ready" | "attention" | "active"; startedAt: string | null; taskState?: "running" | "paused" | "cancelling" | null; taskControllable?: boolean };
+  latestRun: { status: "ready" | "attention" | "active"; startedAt: string | null; taskState?: "running" | "paused" | "cancelling" | null; taskControllable?: boolean; completedToday?: boolean; completedAt?: string | null };
   alerts: Array<{ level: "success" | "warning" | "error"; title: string; detail: string }>;
   activeDownloads: Array<{
     name: string;
@@ -204,11 +204,13 @@ export default function Home() {
     setTaskMessage("");
     try {
       const response = await fetch('/api/task', { method: 'POST' });
+      const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
       if (response.status === 409) {
-        setTaskError("今日任务已经在运行，请稍后查看进度");
+        setTaskMessage(payload.code === "completed_today" ? "今日任务已完成，无需重复运行" : "任务已在后台运行，正在同步状态");
+        await load();
         return;
       }
-      if (!response.ok) throw new Error('Failed to start task');
+      if (!response.ok) throw new Error(payload.error || '无法启动任务');
       setServiceOnline(true);
       setTaskMessage("任务已启动，状态会自动更新");
       window.setTimeout(() => void load(), 500);
@@ -284,6 +286,7 @@ export default function Home() {
   }
 
   const isCrawling = data.latestRun.status === "active";
+  const completedToday = data.latestRun.completedToday === true;
   const taskReady = !isCrawling && data.overview.resolvedVideos === data.overview.uniqueVideos && data.overview.uniqueVideos > 0;
   const allDownloaded = taskReady && data.overview.pendingVideos === 0 && data.overview.downloadedVideos >= data.overview.uniqueVideos;
   const downloading = taskReady && !allDownloaded && data.overview.partialDownloads > 0;
@@ -344,7 +347,7 @@ export default function Home() {
                 <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
                 <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
               </>}
-              {!isCrawling && <button
+              {!isCrawling && !completedToday && <button
                 className="secondary highlight-btn"
                 type="button"
                 onClick={startTask}

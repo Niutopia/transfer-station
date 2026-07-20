@@ -54,7 +54,8 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
   assert.doesNotMatch(source, /className="panel run-panel"/);
-  assert.match(source, /\{!isCrawling && <button/);
+  assert.match(source, /!isCrawling && !completedToday && <button/);
+  assert.match(source, /payload\.code === "completed_today"/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
   assert.match(source, /className="topbar-title">TRANSFER STATION/);
   assert.doesNotMatch(source, /LOCAL MEDIA NODE|className="brand-text"/);

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from task_lock import lock_is_active, read_lock
+from task_history import latest_successful_daily_run
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -24,6 +25,7 @@ PARTIAL_DIR = DATA / "partials"
 OUTPUT = PROJECT / "public" / "status.json"
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
 STAGING_CACHE = DATA / "staging-index-cache.json"
+RUN_HISTORY = DATA / "run-history.jsonl"
 
 
 def iso_from_timestamp(value: float) -> str:
@@ -247,6 +249,15 @@ def main() -> int:
     duplicates = int(metadata.get("duplicates_removed") or max(0, raw_links - unique_videos))
     has_attention = any(alert.get("level") in {"warning", "error"} for alert in alerts)
     run_status = "active" if is_crawling else ("ready" if unique_videos and downloaded_count == unique_videos and not has_attention else "attention")
+    completed_run = latest_successful_daily_run(RUN_HISTORY, today=today)
+    completed_today = bool(
+        completed_run
+        and not is_crawling
+        and unique_videos
+        and resolved_count == unique_videos
+        and downloaded_count == unique_videos
+        and not partials
+    )
 
     payload = {
         "generatedAt": now.isoformat(timespec="seconds"),
@@ -285,6 +296,8 @@ def main() -> int:
             "startedAt": str(lock_payload.get("startedAt") or latest_crawl_at) if is_crawling else latest_crawl_at,
             "taskState": lock_payload.get("state") if lock_payload else None,
             "taskControllable": bool(lock_payload.get("controllable")) if lock_payload else False,
+            "completedToday": completed_today,
+            "completedAt": completed_run.get("timestamp") if completed_today and completed_run else None,
             "stages": [
                 {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},
                 {"name": "去重", "status": "active" if is_crawling else ("done" if unique_videos else "waiting"), "value": unique_videos, "note": f"移除 {duplicates} 个重复"},

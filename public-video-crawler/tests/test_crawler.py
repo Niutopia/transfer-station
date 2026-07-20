@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import datetime
 import io
 import json
 import os
@@ -17,6 +18,7 @@ import download
 
 sys.path.append(str(Path(__file__).resolve().parents[2] / "scripts"))
 import task_lock
+import task_history
 
 
 FIXTURE = """
@@ -375,6 +377,22 @@ class CrawlerTests(unittest.TestCase):
             self.assertFalse(second.acquire())
             first.release()
             self.assertFalse(path.exists())
+
+    def test_daily_history_finds_only_a_successful_download_from_today(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "run-history.jsonl"
+            history.write_text("\n".join([
+                "not-json",
+                json.dumps({"timestamp": "2026-07-19T23:59:00+08:00", "crawlExitCode": 0, "downloadExitCode": 0, "downloadRequested": True}),
+                json.dumps({"timestamp": "2026-07-20T08:00:00+08:00", "crawlExitCode": 1, "downloadExitCode": None, "downloadRequested": True}),
+                json.dumps({"timestamp": "2026-07-20T09:00:00+08:00", "crawlExitCode": 0, "downloadExitCode": None, "downloadRequested": False}),
+                json.dumps({"timestamp": "2026-07-20T10:00:00+08:00", "crawlExitCode": 0, "downloadExitCode": 0, "downloadRequested": True}),
+            ]), encoding="utf-8")
+
+            event = task_history.latest_successful_daily_run(history, today=datetime.date(2026, 7, 20))
+
+            self.assertIsNotNone(event)
+            self.assertEqual(event["timestamp"], "2026-07-20T10:00:00+08:00")
 
 
 if __name__ == "__main__":

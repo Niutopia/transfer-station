@@ -198,7 +198,7 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 .hero h1 { max-width: 760px; margin: 14px 0 10px; font-size: clamp(25px, 2.5vw, 36px); line-height: 1.2; letter-spacing: -.04em; }
 .hero p { max-width: 780px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.75; }
 .task-feedback { margin-top: 12px !important; font-size: 12px !important; font-weight: 800; }
-.task-feedback.error { color: var(--red); }
+.task-feedback.error { color: #825b19; }
 .task-feedback.success { color: var(--green-dark); }
 
 .service-health {
