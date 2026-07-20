@@ -89,6 +89,7 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /current-task-panel/);
   assert.doesNotMatch(source, /\{isCrawling && currentProgress && <section className="current-task-panel"/);
   assert.match(source, /等待手动开始任务/);
+  assert.match(source, /className="current-task-actions"/);
   assert.match(source, /currentProgress/);
   assert.match(source, /lastProgress/);
   assert.match(source, /CURRENT TASK/);

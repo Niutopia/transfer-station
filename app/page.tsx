@@ -351,18 +351,6 @@ export default function Home() {
               </div>
             </div>
             <div className="hero-actions">
-              {isCrawling && data.latestRun.taskControllable && <>
-                <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
-                <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
-              </>}
-              {!isCrawling && <button
-                className="secondary highlight-btn"
-                type="button"
-                onClick={startTask}
-                disabled={startingTask || serviceOnline === false}
-              >
-                {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
-              </button>}
               <button className="primary" type="button" onClick={() => void load()} disabled={refreshing}>
                 {refreshing ? "正在刷新" : "刷新状态"}
               </button>
@@ -372,7 +360,21 @@ export default function Home() {
           <section className={`current-task-panel ${isCrawling ? "is-active" : "is-idle"}`} aria-labelledby="current-task-title">
             <div className="current-task-head">
               <div><span className="current-kicker"><i />CURRENT TASK</span><h2 id="current-task-title">{isCrawling && currentProgress ? taskPaused ? "任务已暂停" : progressTitle(currentProgress.stage) : "等待手动开始任务"}</h2></div>
-              <span className={`status ${isCrawling ? taskPaused ? "waiting" : "active" : "done"}`}>{isCrawling ? taskPaused ? "已暂停" : "运行中" : "空闲"}</span>
+              <div className="current-task-actions">
+                <span className={`status ${isCrawling ? taskPaused ? "waiting" : "active" : "done"}`}>{isCrawling ? taskPaused ? "已暂停" : "运行中" : "空闲"}</span>
+                {isCrawling && data.latestRun.taskControllable && <>
+                  <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
+                  <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
+                </>}
+                {!isCrawling && <button
+                  className="secondary highlight-btn"
+                  type="button"
+                  onClick={startTask}
+                  disabled={startingTask || serviceOnline === false}
+                >
+                  {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
+                </button>}
+              </div>
             </div>
             <div className="current-task-grid">
               <span><small>当前阶段</small><strong>{!isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
