@@ -287,7 +287,9 @@ def select_for_processing(
     skipped_count = 0
     for video in videos:
         file_exists = existing_keys is not None and video.viewkey in existing_keys
-        if success_keys is not None and video.viewkey in success_keys and (existing_keys is None or file_exists):
+        # The staging directory is a transfer area. Once a video has completed,
+        # moving or deleting it is intentional and must not create a retry.
+        if success_keys is not None and video.viewkey in success_keys:
             skipped_count += 1
             continue
 

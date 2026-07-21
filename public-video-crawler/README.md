@@ -55,6 +55,6 @@ python3 -m unittest discover -s tests -v
 - 同一页出现两套重复卡片时，优先采用当前可见列表使用的 `c=llzvq` 卡片元数据。
 - 同一 `viewkey` 跨页再次出现时合并 `source_pages`，不会重复输出。
 - `data/video-history.json` 保存跨日 `viewkey` 历史；日常任务只解析历史中没有的新条目。
-- 下载任务会同时检查“中转站”内现有文件；历史条目对应文件缺失时才重新解析并重试。
+- `download-success.txt` 是永久成功历史；已成功的视频即使之后被移走或手动删除，也不会重新解析或下载。
 
 边界：站点结构变化或 Cloudflare Challenge 可能导致解析为空；工具会保留每页原始链接数和最终唯一数，便于发现异常。请遵守书面授权范围、站点规则和适用法律。

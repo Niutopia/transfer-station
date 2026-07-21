@@ -185,7 +185,7 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual([video.viewkey for video in processing], ["abc12345"])
         self.assertEqual((new_count, retry_count, skipped_count), (0, 1, 0))
 
-    def test_success_history_does_not_hide_a_missing_file(self) -> None:
+    def test_success_history_permanently_skips_an_intentionally_removed_file(self) -> None:
         history = {
             "abc12345": crawler.Video(
                 viewkey="abc12345",
@@ -197,8 +197,8 @@ class CrawlerTests(unittest.TestCase):
         processing, new_count, retry_count, skipped_count = crawler.select_for_processing(
             current, history, set(), {"abc12345"}
         )
-        self.assertEqual([video.viewkey for video in processing], ["abc12345"])
-        self.assertEqual((new_count, retry_count, skipped_count), (0, 1, 0))
+        self.assertEqual(processing, [])
+        self.assertEqual((new_count, retry_count, skipped_count), (0, 0, 1))
 
     def test_page_url_preserves_filters_and_replaces_page(self) -> None:
         url = crawler.page_url(

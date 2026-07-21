@@ -142,11 +142,12 @@ def main() -> int:
     files = scan_files()
     partials = scan_partials()
     downloaded_keys = {item["path"].stem for item in files if item["path"].stem in listed_keys}
+    completed_keys = listed_keys & (success_keys | downloaded_keys)
 
     resolved_keys = {
         str(video.get("viewkey"))
         for video in videos
-        if isinstance(video, dict) and video.get("viewkey") and (video.get("media_url") or str(video.get("viewkey")) in downloaded_keys)
+        if isinstance(video, dict) and video.get("viewkey") and (video.get("media_url") or str(video.get("viewkey")) in completed_keys)
     }
     total_bytes = sum(item["sizeBytes"] for item in files)
     today = now.date()
@@ -183,12 +184,9 @@ def main() -> int:
         alerts.append({"level": "warning", "title": "存在未解析媒体", "detail": f"{len(listed_keys) - len(resolved_keys)} 个条目缺少媒体地址。"})
     if partials and not is_crawling:
         alerts.append({"level": "warning", "title": "发现未完成下载", "detail": f"临时目录有 {len(partials)} 个 .part 文件。"})
-    unresolved_manifest_failures = [item for item in manifest_failures if str(item.get("viewkey") or "") not in downloaded_keys]
+    unresolved_manifest_failures = [item for item in manifest_failures if str(item.get("viewkey") or "") not in completed_keys]
     if unresolved_manifest_failures:
         alerts.append({"level": "error", "title": "最近下载有失败项", "detail": f"下载清单记录 {len(unresolved_manifest_failures)} 个尚未恢复的失败。"})
-    missing_success_files = {key for key in success_keys if key in listed_keys and key not in downloaded_keys}
-    if missing_success_files:
-        alerts.append({"level": "warning", "title": "历史记录与文件不一致", "detail": f"成功历史中有 {len(missing_success_files)} 个条目缺少实际文件，将在后续任务中重试。"})
     if not alerts:
         alerts.append({"level": "success", "title": "数据链路正常", "detail": "未发现过期快照、未解析媒体或残留分片。"})
 
@@ -246,7 +244,7 @@ def main() -> int:
     pending_downloads = []
     if not is_crawling:
         for key, partial in sorted(partial_by_key.items()):
-            if key in resolved_keys and key not in downloaded_keys:
+            if key in resolved_keys and key not in completed_keys:
                 pending_downloads.append({
                     "name": title_by_key.get(key, key),
                     "fileName": partial.name,
@@ -254,7 +252,7 @@ def main() -> int:
                     "status": "resumable",
                 })
     for key, title in title_by_key.items():
-        if key in resolved_keys and key not in downloaded_keys and key not in active_keys:
+        if key in resolved_keys and key not in completed_keys and key not in active_keys:
             pending_downloads.append({
                 "name": title,
                 "fileName": f"{key}.mp4",
@@ -263,7 +261,7 @@ def main() -> int:
 
     unique_videos = int(metadata.get("unique_videos") or len(listed_keys))
     resolved_count = len(resolved_keys)
-    downloaded_count = len(downloaded_keys)
+    downloaded_count = len(completed_keys)
     pending_count = max(0, unique_videos - downloaded_count)
     raw_links = int(metadata.get("raw_detail_links") or unique_videos)
     duplicates = int(metadata.get("duplicates_removed") or max(0, raw_links - unique_videos))

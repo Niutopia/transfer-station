@@ -28,7 +28,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(status.source.stagingPath.endsWith("/中转站"), true);
   assert.equal(status.overview.uniqueVideos >= 0, true);
   assert.equal(status.overview.resolvedVideos <= status.overview.uniqueVideos, true);
-  assert.equal(status.overview.downloadedVideos <= status.overview.totalFiles, true);
+  assert.equal(status.overview.downloadedVideos <= status.overview.uniqueVideos, true);
   assert.equal(status.overview.pendingVideos, status.overview.uniqueVideos - status.overview.downloadedVideos);
   assert.equal(status.overview.rawLinks - status.overview.uniqueVideos, status.overview.duplicatesRemoved);
   assert.equal(status.daily.length, 14);
@@ -36,6 +36,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(Object.hasOwn(status, "currentProgress"), true);
   assert.equal(Object.hasOwn(status, "lastProgress"), true);
   assert.equal(typeof status.latestRun.result, "object");
+  assert.equal(status.alerts.some((alert) => alert.title === "历史记录与文件不一致"), false);
   assert.equal(status.latestRun.result.rawLinks >= status.latestRun.result.uniqueVideos, true);
   if (status.lastProgress) {
     assert.equal(status.lastProgress.stage, "complete");
