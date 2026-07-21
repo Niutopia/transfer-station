@@ -234,6 +234,12 @@ export default function Home() {
     try {
       const response = await fetch('/api/task', { method: 'POST' });
       const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
+      if (payload.code === "no_sources") {
+        setServiceOnline(true);
+        setTaskLaunching(false);
+        setTaskError(payload.error || "请先添加抓取链接");
+        return;
+      }
       if (response.status === 409) {
         setTaskMessage("任务已在后台运行，正在同步状态");
         window.setTimeout(() => setTaskLaunching(false), 8_000);
@@ -440,9 +446,9 @@ export default function Home() {
                   className="secondary highlight-btn"
                   type="button"
                   onClick={startTask}
-                  disabled={startingTask || serviceOnline === false}
+                  disabled={startingTask || serviceOnline === false || data.source.listingCount === 0}
                 >
-                  {serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
+                  {data.source.listingCount === 0 ? "请先添加抓取链接" : serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
                 </button>}
               </div>
             </div>
@@ -515,7 +521,7 @@ export default function Home() {
                 <h2 id="source-manager-title">抓取链接任务栏</h2>
                 <p>管理下一次手动任务要检查的榜单链接，每个链接抓取前 {data.source.pagesPerListing} 页。</p>
               </div>
-              <span className={`status ${taskAppearsActive ? "active" : "done"}`}>{taskAppearsActive ? "任务中·已锁定" : `${data.source.sources?.length ?? 0} 个链接`}</span>
+              <span className={`status ${taskAppearsActive ? "active" : (data.source.sources?.length ?? 0) === 0 ? "waiting" : "done"}`}>{taskAppearsActive ? "任务中·已锁定" : `${data.source.sources?.length ?? 0} 个链接`}</span>
             </div>
             <form className="source-form" onSubmit={addCrawlSource}>
               <label>
@@ -523,14 +529,15 @@ export default function Home() {
                 <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} maxLength={40} placeholder="例如：最近热门" disabled={taskAppearsActive || sourceSaving} />
               </label>
               <label>
-                <span>HTTPS 榜单链接</span>
-                <input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} required placeholder="https://91porn.com/v.php?category=..." disabled={taskAppearsActive || sourceSaving} />
+                <span>HTTPS 榜单 / 首页链接</span>
+                <input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} required placeholder="https://91porn.com/index.php 或 /v.php?..." disabled={taskAppearsActive || sourceSaving} />
               </label>
               <button className="source-add" type="submit" disabled={taskAppearsActive || sourceSaving || !sourceUrl.trim()}>{sourceSaving ? "正在保存…" : "+ 添加链接"}</button>
             </form>
             {sourceFeedback && <p className="source-feedback success" role="status">{sourceFeedback}</p>}
             {sourceError && <p className="source-feedback error" role="alert">{sourceError}</p>}
             <div className="source-list" aria-label="已配置抓取链接">
+              {(data.source.sources?.length ?? 0) === 0 && <div className="source-empty"><strong>暂无抓取链接</strong><span>添加榜单或首页链接后，才能启动下一次手动任务。</span></div>}
               {(data.source.sources ?? []).map((source, index) => <article className="source-item" key={source.url}>
                 <span className="source-index">{String(index + 1).padStart(2, "0")}</span>
                 <div className="source-copy"><strong>{source.name}</strong><code title={source.url}>{source.url}</code></div>
@@ -538,8 +545,8 @@ export default function Home() {
                   className="source-delete"
                   type="button"
                   onClick={() => void deleteCrawlSource(source)}
-                  disabled={taskAppearsActive || sourceDeleting === source.url || (data.source.sources?.length ?? 0) <= 1}
-                  title={(data.source.sources?.length ?? 0) <= 1 ? "至少保留一个抓取链接" : `删除 ${source.name}`}
+                  disabled={taskAppearsActive || sourceDeleting === source.url}
+                  title={`删除 ${source.name}`}
                 >{sourceDeleting === source.url ? "删除中…" : "删除"}</button>
               </article>)}
             </div>

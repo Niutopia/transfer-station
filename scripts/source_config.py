@@ -37,15 +37,14 @@ def normalize_source(name: str, raw_url: str) -> dict[str, str]:
     hostname = (parsed.hostname or "").lower().rstrip(".")
     if parsed.scheme != "https" or hostname not in {"91porn.com", "www.91porn.com"}:
         raise SourceConfigError("只支持 91porn.com 的 HTTPS 榜单链接")
-    if parsed.username or parsed.password or parsed.path != "/v.php":
-        raise SourceConfigError("请输入不含账号信息的 /v.php 榜单链接")
+    if parsed.username or parsed.password or parsed.path not in {"/v.php", "/index.php"}:
+        raise SourceConfigError("请输入不含账号信息的 /v.php 榜单或 /index.php 首页链接")
     query = parse_qs(parsed.query)
     category = str((query.get("category") or [""])[0]).strip()
-    if not category:
-        raise SourceConfigError("榜单链接必须包含 category 参数")
+    next_view = str((query.get("next") or [""])[0]).strip()
     normalized_query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
-    normalized_url = urlunsplit(("https", hostname, "/v.php", normalized_query, ""))
-    source_name = name.strip() or category
+    normalized_url = urlunsplit(("https", hostname, parsed.path, normalized_query, ""))
+    source_name = name.strip() or category or next_view or ("首页" if parsed.path == "/index.php" else "榜单")
     if len(source_name) > 40:
         raise SourceConfigError("名称不能超过 40 个字符")
     return {"name": source_name, "url": normalized_url}
@@ -87,8 +86,6 @@ def add_source(path: Path, name: str, url: str) -> list[dict[str, str]]:
 def remove_source(path: Path, url: str) -> list[dict[str, str]]:
     config = load_source_config(path)
     sources = [item for item in config["sources"] if isinstance(item, dict) and item.get("url")]
-    if len(sources) <= 1:
-        raise SourceConfigError("至少需要保留一个抓取链接")
     remaining = [item for item in sources if str(item.get("url")) != url]
     if len(remaining) == len(sources):
         raise SourceConfigError("未找到要删除的抓取链接")

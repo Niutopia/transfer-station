@@ -51,8 +51,8 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(stagingFiles.every((name) => /\.(?:mp4|m4v|webm|ts|mkv|mov|avi)$/i.test(name)), true);
   assert.equal(status.overview.totalFiles <= stagingFiles.length, true);
   const dailyConfig = JSON.parse(await readFile(new URL("../config/daily-sources.json", import.meta.url), "utf8"));
-  assert.equal(dailyConfig.sources.length, 5);
-  assert.equal(new Set(dailyConfig.sources.map((source) => source.url)).size, 5);
+  assert.equal(Array.isArray(dailyConfig.sources), true);
+  assert.equal(new Set(dailyConfig.sources.map((source) => source.url)).size, dailyConfig.sources.length);
   assert.deepEqual(status.source.sources, dailyConfig.sources);
 });
 
@@ -119,12 +119,15 @@ test("crawl sources can be managed safely from the dashboard", async () => {
   assert.match(source, /method: "DELETE"/);
   assert.match(source, /source-manager/);
   assert.match(source, /任务中·已锁定/);
+  assert.match(source, /index\.php/);
+  assert.match(source, /暂无抓取链接/);
 
   const taskService = await readFile(new URL("../scripts/start-local.py", import.meta.url), "utf8");
   assert.match(taskService, /add_source/);
   assert.match(taskService, /remove_source/);
   assert.match(taskService, /source_edit_blocked/);
   assert.match(taskService, /do_DELETE/);
+  assert.match(taskService, /no_sources/);
 
   const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
   assert.match(compose, /\.\/config:\/app\/config\s/);

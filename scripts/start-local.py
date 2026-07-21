@@ -102,6 +102,15 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                 if type(self).start_pending or lock_is_active(lock_path):
                     self.send_json(409, {"error": "任务已在后台运行", "code": "task_running"})
                     return
+                try:
+                    source_config = load_source_config(SOURCE_CONFIG)
+                except SourceConfigError as exc:
+                    self.send_json(500, {"error": str(exc), "code": "source_config_invalid"})
+                    return
+                configured_sources = source_config.get("sources")
+                if not isinstance(configured_sources, list) or not configured_sources:
+                    self.send_json(409, {"error": "请先添加至少一个抓取链接", "code": "no_sources"})
+                    return
                 log_dir = PROJECT / "data" / "logs"
                 log_dir.mkdir(parents=True, exist_ok=True)
                 stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")

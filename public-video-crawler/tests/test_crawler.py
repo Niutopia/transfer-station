@@ -91,7 +91,10 @@ class CrawlerTests(unittest.TestCase):
             self.assertEqual(remaining, original["sources"])
             self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["pagesPerSource"], 2)
 
-    def test_source_config_rejects_invalid_duplicate_and_last_removal(self) -> None:
+            empty = source_config.remove_source(path, original["sources"][0]["url"])
+            self.assertEqual(empty, [])
+
+    def test_source_config_accepts_homepage_and_rejects_invalid_or_duplicate_links(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "daily-sources.json"
             path.write_text(json.dumps({
@@ -103,8 +106,10 @@ class CrawlerTests(unittest.TestCase):
                 source_config.add_source(path, "bad", "https://example.com/v.php?category=hot")
             with self.assertRaises(source_config.SourceConfigError):
                 source_config.add_source(path, "duplicate", "https://91porn.com/v.php?viewtype=basic&category=hot")
-            with self.assertRaises(source_config.SourceConfigError):
-                source_config.remove_source(path, "https://91porn.com/v.php?category=hot&viewtype=basic")
+            sources = source_config.add_source(path, "", "https://91porn.com/index.php")
+            self.assertEqual(sources[-1], {"name": "首页", "url": "https://91porn.com/index.php"})
+            sources = source_config.add_source(path, "", "https://91porn.com/v.php?next=watch")
+            self.assertEqual(sources[-1], {"name": "watch", "url": "https://91porn.com/v.php?next=watch"})
 
     def test_completed_progress_is_archived_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -203,6 +208,7 @@ class CrawlerTests(unittest.TestCase):
         self.assertIn("viewtype=basic", url)
         self.assertIn("page=2", url)
         self.assertNotIn("page=9", url)
+        self.assertEqual(crawler.page_url("https://91porn.com/index.php", 2), "https://91porn.com/index.php?page=2")
 
     def test_cli_accepts_multiple_listing_sources(self) -> None:
         args = crawler.parse_args([

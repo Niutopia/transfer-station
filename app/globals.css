@@ -256,6 +256,9 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 .source-copy strong { font-size: 11px; }
 .source-copy code { margin-top: 3px; color: var(--muted); font-family: var(--font-geist-mono), "SFMono-Regular", Menlo, Monaco, monospace; font-size: 9px; }
 .source-delete { padding: 6px 8px; border: 1px solid var(--line); background: var(--red-soft); color: #792e2a; font-size: 9px; font-weight: 900; cursor: pointer; }
+.source-empty { grid-column: 1 / -1; display: grid; gap: 4px; padding: 14px; border: 1px dashed var(--line-soft); background: #f8f1dc; text-align: center; }
+.source-empty strong { font-size: 11px; }
+.source-empty span { color: var(--muted); font-size: 10px; }
 
 .current-task-panel {
   margin-bottom: 24px;
