@@ -564,15 +564,6 @@ export default function Home() {
         </section>
 
         <aside className="side-column" aria-label="运行状态">
-          <section className="side-card">
-            <div className="side-card-head"><div><span>磁盘空间</span><strong>{data.storage.diskUsedPercent}% 已使用</strong></div><span>{formatBytes(data.storage.diskFreeBytes)} 可用</span></div>
-            <div className="storage-track" role="progressbar" aria-label="磁盘使用率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={data.storage.diskUsedPercent}><i style={{ width: `${Math.min(100, data.storage.diskUsedPercent)}%` }} /></div>
-            <div className="side-stats"><span><small>中转站</small><strong>{formatBytes(data.overview.totalBytes)}</strong></span><span><small>文件数</small><strong>{nf.format(data.overview.totalFiles)}</strong></span></div>
-          </section>
-          <section className="side-card">
-            <div className="side-title"><h2>运行状态</h2><span className={`status ${data.latestRun.status === "active" ? "active" : data.latestRun.status === "attention" ? "attention" : "done"}`}>{data.latestRun.status === "active" ? "运行中" : data.latestRun.status === "attention" ? "需检查" : "就绪"}</span></div>
-            <div className="alert-list">{data.alerts.map((alert, index) => <div className={`alert-item ${alert.level}`} key={`${alert.title}-${index}`}><span aria-hidden="true" /><div><strong>{alert.title}</strong><p>{alert.detail}</p></div></div>)}</div>
-          </section>
           <section className={`side-card task-result-card result-${taskAppearsActive ? "active" : taskResult?.status ?? "none"}`} aria-labelledby="task-result-title">
             <div className="side-title">
               <h2 id="task-result-title">本次任务结果</h2>
@@ -596,6 +587,15 @@ export default function Home() {
             </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
             {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}
             {taskError && <p className="task-result-feedback error" role="alert">{taskError}</p>}
+          </section>
+          <section className="side-card">
+            <div className="side-card-head"><div><span>磁盘空间</span><strong>{data.storage.diskUsedPercent}% 已使用</strong></div><span>{formatBytes(data.storage.diskFreeBytes)} 可用</span></div>
+            <div className="storage-track" role="progressbar" aria-label="磁盘使用率" aria-valuemin={0} aria-valuemax={100} aria-valuenow={data.storage.diskUsedPercent}><i style={{ width: `${Math.min(100, data.storage.diskUsedPercent)}%` }} /></div>
+            <div className="side-stats"><span><small>中转站</small><strong>{formatBytes(data.overview.totalBytes)}</strong></span><span><small>文件数</small><strong>{nf.format(data.overview.totalFiles)}</strong></span></div>
+          </section>
+          <section className="side-card">
+            <div className="side-title"><h2>运行状态</h2><span className={`status ${data.latestRun.status === "active" ? "active" : data.latestRun.status === "attention" ? "attention" : "done"}`}>{data.latestRun.status === "active" ? "运行中" : data.latestRun.status === "attention" ? "需检查" : "就绪"}</span></div>
+            <div className="alert-list">{data.alerts.map((alert, index) => <div className={`alert-item ${alert.level}`} key={`${alert.title}-${index}`}><span aria-hidden="true" /><div><strong>{alert.title}</strong><p>{alert.detail}</p></div></div>)}</div>
           </section>
         </aside>
       </div>
