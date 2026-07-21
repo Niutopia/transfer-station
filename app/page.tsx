@@ -232,6 +232,7 @@ export default function Home() {
     setTaskLaunching(true);
     setTaskError("");
     setTaskMessage("");
+    setSourceFeedback("");
     try {
       const response = await fetch('/api/task', { method: 'POST' });
       const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
@@ -332,6 +333,12 @@ export default function Home() {
       abortControllerRef.current?.abort();
     };
   }, [load, loadServiceHealth]);
+
+  useEffect(() => {
+    if (!sourceFeedback) return;
+    const timer = window.setTimeout(() => setSourceFeedback(""), 3_500);
+    return () => window.clearTimeout(timer);
+  }, [sourceFeedback]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -527,11 +534,11 @@ export default function Home() {
             <form className="source-form" onSubmit={addCrawlSource}>
               <label>
                 <span>名称（可选）</span>
-                <input value={sourceName} onChange={(event) => setSourceName(event.target.value)} maxLength={40} placeholder="例如：最近热门" disabled={taskAppearsActive || sourceSaving} />
+                <input value={sourceName} onChange={(event) => { setSourceName(event.target.value); setSourceFeedback(""); setSourceError(""); }} maxLength={40} placeholder="例如：最近热门" disabled={taskAppearsActive || sourceSaving} />
               </label>
               <label>
                 <span>HTTPS 榜单 / 首页链接</span>
-                <input type="url" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} required placeholder="https://91porn.com/index.php 或 /v.php?..." disabled={taskAppearsActive || sourceSaving} />
+                <input type="url" value={sourceUrl} onChange={(event) => { setSourceUrl(event.target.value); setSourceFeedback(""); setSourceError(""); }} required placeholder="https://91porn.com/index.php 或 /v.php?..." disabled={taskAppearsActive || sourceSaving} />
               </label>
               <button className="source-add" type="submit" disabled={taskAppearsActive || sourceSaving || !sourceUrl.trim()}>{sourceSaving ? "正在保存…" : "+ 添加链接"}</button>
             </form>
