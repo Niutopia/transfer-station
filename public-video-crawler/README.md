@@ -1,6 +1,6 @@
 # 公开列表视频索引器
 
-该工具抓取 `https://91porn.com/v.php` 或 `index.php` 的公开列表，默认读取第 1、2 页，按 `viewkey` 去重，并输出 JSON 与 CSV。每日任务还会维护跨日历史索引，已见且已下载的视频不会再次访问详情页或进入下载队列。
+该工具抓取 `https://91porn.com/v.php` 或 `index.php` 的公开列表，默认读取第 1、2 页，先按 `viewkey` 去重，并输出 JSON 与 CSV。每日任务还会维护跨日历史索引和 SHA-256 内容指纹，已见且已处理的视频不会再次访问详情页或进入下载队列，换了 `viewkey` 的同一内容也不会二次入库。
 
 `npm run daily` / `npm run daily:download` 的来源统一配置在 `config/daily-sources.json`。当前包含 `hot`、`top`、`tf`、`top&m=-1`、`mf` 五个榜单；同一 `viewkey` 即使同时出现在多个榜单也只保留一条。
 
@@ -56,5 +56,6 @@ python3 -m unittest discover -s tests -v
 - 同一 `viewkey` 跨页再次出现时合并 `source_pages`，不会重复输出。
 - `data/video-history.json` 保存跨日 `viewkey` 历史；日常任务只解析历史中没有的新条目。
 - `download-success.txt` 是永久成功历史；已成功的视频即使之后被移走或手动删除，也不会重新解析或下载。
+- `data/download-content-history.json` 保存文件内容指纹；下载完成后、正式入库前检查，命中历史内容时删除临时副本并将新 `viewkey` 记为已处理。
 
 边界：站点结构变化或 Cloudflare Challenge 可能导致解析为空；工具会保留每页原始链接数和最终唯一数，便于发现异常。请遵守书面授权范围、站点规则和适用法律。

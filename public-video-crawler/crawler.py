@@ -287,17 +287,17 @@ def select_for_processing(
     skipped_count = 0
     for video in videos:
         file_exists = existing_keys is not None and video.viewkey in existing_keys
-        # The staging directory is a transfer area. Once a video has completed,
-        # moving or deleting it is intentional and must not create a retry.
-        if success_keys is not None and video.viewkey in success_keys:
-            skipped_count += 1
-            continue
-
         previous = history.get(video.viewkey)
         if previous is not None:
             for attr in ("title", "thumbnail_url", "duration", "media_url", "resolved_at"):
                 if not getattr(video, attr) and getattr(previous, attr):
                     setattr(video, attr, getattr(previous, attr))
+
+        # The staging directory is a transfer area. Once a video has completed,
+        # moving or deleting it is intentional and must not create a retry.
+        if success_keys is not None and video.viewkey in success_keys:
+            skipped_count += 1
+            continue
 
         if not video.media_url:
             processing.append(video)

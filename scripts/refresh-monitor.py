@@ -336,6 +336,7 @@ def main() -> int:
                 "newVideos": int((latest_event or {}).get("newVideos") or 0),
                 "retryVideos": int((latest_event or {}).get("retryVideos") or 0),
                 "downloadedVideos": int((latest_event or {}).get("downloadedVideos") or 0),
+                "duplicateVideos": int((latest_event or {}).get("duplicateVideos") or 0),
                 "failedVideos": int((latest_event or {}).get("failedVideos") or 0),
                 "downloadedBytes": int((latest_event or {}).get("downloadedBytes") or 0),
             },

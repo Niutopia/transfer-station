@@ -97,6 +97,7 @@ def main() -> int:
                     "--manifest", str(DATA / "download-manifest.json"),
                     "--work-dir", str(DATA / "partials"),
                     "--success-history", str(DATA / "download-success.txt"),
+                    "--content-history", str(DATA / "download-content-history.json"),
                     "--media-cache", str(DATA / "video-history.json"),
                     "--delay", str(args.delay),
                     "--concurrency", "4",
@@ -140,8 +141,16 @@ def main() -> int:
             progress_payload = json.loads((DATA / "download-progress.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             progress_payload = {}
-    processed_videos = int(progress_payload.get("done") or 0) if isinstance(progress_payload, dict) else 0
-    failed_videos = int(progress_payload.get("failed") or 0) if isinstance(progress_payload, dict) else 0
+    manifest_payload = {}
+    try:
+        manifest_payload = json.loads((DATA / "download-manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        pass
+    manifest_results = manifest_payload if isinstance(manifest_payload, list) and pending_videos else []
+    downloaded_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") in {"downloaded", "skipped"})
+    duplicate_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "duplicate")
+    failed_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "failed")
+    downloaded_bytes = sum(int(item.get("bytes") or 0) for item in manifest_results if isinstance(item, dict) and item.get("status") == "downloaded")
     event = {
         "timestamp": task_finished_at.isoformat(timespec="seconds"),
         "startedAt": task_started_at.isoformat(timespec="seconds"),
@@ -156,9 +165,10 @@ def main() -> int:
         "skippedVideos": int(pending_metadata.get("known_videos_skipped") or 0),
         "newVideos": int(pending_metadata.get("new_videos") or 0) if args.download else None,
         "retryVideos": int(pending_metadata.get("retry_videos") or 0) if args.download else None,
-        "downloadedVideos": max(0, processed_videos - failed_videos),
+        "downloadedVideos": downloaded_videos,
+        "duplicateVideos": duplicate_videos,
         "failedVideos": failed_videos,
-        "downloadedBytes": int(progress_payload.get("bytesDone") or 0) if isinstance(progress_payload, dict) else 0,
+        "downloadedBytes": downloaded_bytes,
     }
     with RUN_HISTORY.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")

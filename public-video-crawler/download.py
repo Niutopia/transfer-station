@@ -80,6 +80,86 @@ class RateLimiter:
             time.sleep(delay)
 
 
+class ContentHistory:
+    """Thread-safe history of file hashes that have already reached staging."""
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self._lock = threading.Lock()
+        self._items: dict[str, dict[str, object]] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self.path is None:
+            return
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+            hashes = payload.get("hashes") if isinstance(payload, dict) else None
+            if isinstance(hashes, dict):
+                self._items = {
+                    str(digest): value
+                    for digest, value in hashes.items()
+                    if re.fullmatch(r"[0-9a-f]{64}", str(digest)) and isinstance(value, dict)
+                }
+                return
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
+        self._bootstrap_from_logs()
+
+    def _bootstrap_from_logs(self) -> None:
+        if self.path is None:
+            return
+        log_dir = self.path.parent / "logs"
+        for log_path in sorted(log_dir.glob("download-*.log")):
+            try:
+                lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                digest = str(row.get("sha256") or "") if isinstance(row, dict) else ""
+                viewkey = str(row.get("viewkey") or "") if isinstance(row, dict) else ""
+                if not re.fullmatch(r"[0-9a-f]{64}", digest) or not viewkey:
+                    continue
+                self._items.setdefault(digest, {
+                    "viewkey": viewkey,
+                    "bytes": int(row.get("bytes") or 0),
+                    "recordedAt": str(row.get("recordedAt") or ""),
+                })
+        if self._items:
+            self._persist()
+
+    def _persist(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps({"version": 1, "hashes": self._items}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, self.path)
+
+    def claim(self, digest: str, viewkey: str, total_bytes: int) -> str | None:
+        """Reserve a content hash, returning the first viewkey when it is duplicate."""
+        with self._lock:
+            existing = self._items.get(digest)
+            if existing:
+                original = str(existing.get("viewkey") or "")
+                return original if original and original != viewkey else None
+            self._items[digest] = {
+                "viewkey": viewkey,
+                "bytes": total_bytes,
+                "recordedAt": _iso_now(),
+            }
+            self._persist()
+            return None
+
+
 def _iso_now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -331,19 +411,59 @@ def _report(
     })
 
 
-def _verify_and_result(final: Path, item: dict[str, str], started_at: float, resumed: bool) -> dict[str, object]:
+def _hash_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
-    with final.open("rb") as handle:
+    with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(CHUNK_SIZE), b""):
             digest.update(chunk)
+    return digest.hexdigest(), path.stat().st_size
+
+
+def _verify_and_result(final: Path, item: dict[str, str], started_at: float, resumed: bool) -> dict[str, object]:
+    digest, total_bytes = _hash_file(final)
     elapsed = max(0.001, time.monotonic() - started_at)
-    total_bytes = final.stat().st_size
     return {
         "viewkey": item["viewkey"],
         "status": "downloaded",
         "path": str(final),
         "bytes": total_bytes,
         "sha256": digest.hexdigest(),
+        "duration_s": round(elapsed, 1),
+        "speed_bytes_s": round(total_bytes / elapsed, 1),
+        "resumed": resumed,
+    }
+
+
+def _finalize_verified_partial(
+    partial: Path,
+    final: Path,
+    item: dict[str, str],
+    started_at: float,
+    resumed: bool,
+    content_history: ContentHistory | None,
+) -> dict[str, object]:
+    digest, total_bytes = _hash_file(partial)
+    duplicate_of = content_history.claim(digest, item["viewkey"], total_bytes) if content_history else None
+    elapsed = max(0.001, time.monotonic() - started_at)
+    if duplicate_of:
+        _reset_partial(partial)
+        return {
+            "viewkey": item["viewkey"],
+            "status": "duplicate",
+            "duplicate_of": duplicate_of,
+            "bytes": total_bytes,
+            "sha256": digest,
+            "duration_s": round(elapsed, 1),
+            "speed_bytes_s": round(total_bytes / elapsed, 1),
+            "resumed": resumed,
+        }
+    _finalize_partial(partial, final)
+    return {
+        "viewkey": item["viewkey"],
+        "status": "downloaded",
+        "path": str(final),
+        "bytes": total_bytes,
+        "sha256": digest,
         "duration_s": round(elapsed, 1),
         "speed_bytes_s": round(total_bytes / elapsed, 1),
         "resumed": resumed,
@@ -361,6 +481,7 @@ def download_one(
     retries: int = 5,
     progress_callback: Callable[[dict[str, object]], None] | None = None,
     rate_limiter: RateLimiter | None = None,
+    content_history: ContentHistory | None = None,
 ) -> dict[str, object]:
     final = output_dir / f"{item['viewkey']}{extension_for(item['media_url'])}"
     partial = partial_dir / f"{final.name}.part"
@@ -386,8 +507,7 @@ def download_one(
         saved_total = int(saved_meta.get("totalBytes") or 0)
         if offset and saved_total == offset:
             _report(progress_callback, item, final, state="verifying", bytes_done=offset, bytes_total=offset, attempt=attempt, retries=retries, resumed=True)
-            _finalize_partial(partial, final)
-            return _verify_and_result(final, item, started_at, True)
+            return _finalize_verified_partial(partial, final, item, started_at, True, content_history)
         headers = {"User-Agent": USER_AGENT, "Accept": "video/*,application/octet-stream"}
         if item.get("canonical_url"):
             headers["Referer"] = item["canonical_url"]
@@ -410,8 +530,7 @@ def download_one(
                     remote_total = _unsatisfied_total(response_headers.get("Content-Range") if response_headers else None)
                     if remote_total and remote_total == offset:
                         _report(progress_callback, item, final, state="verifying", bytes_done=offset, bytes_total=offset, attempt=attempt, retries=retries, resumed=True)
-                        _finalize_partial(partial, final)
-                        return _verify_and_result(final, item, started_at, True)
+                        return _finalize_verified_partial(partial, final, item, started_at, True, content_history)
                 if status_code in EXPIRED_STATUS_CODES:
                     raise ExpiredMediaError(f"媒体链接失效: HTTP {status_code}") from exc
                 if status_code in TRANSIENT_STATUS_CODES:
@@ -504,8 +623,7 @@ def download_one(
                 if expected_total and total != expected_total:
                     raise TransientDownloadError(f"下载不完整: {total}/{expected_total} 字节")
                 _report(progress_callback, item, final, state="verifying", bytes_done=total, bytes_total=expected_total or total, speed=smoothed_speed, attempt=attempt, retries=retries, resumed=resumed_any)
-                _finalize_partial(partial, final)
-                return _verify_and_result(final, item, started_at, resumed_any)
+                return _finalize_verified_partial(partial, final, item, started_at, resumed_any, content_history)
         except RestartDownload as exc:
             _report(progress_callback, item, final, state="restarting", bytes_done=offset, attempt=attempt, retries=retries, message=str(exc), resumed=True)
             _reset_partial(partial)
@@ -586,6 +704,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("downloads"))
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--success-history", type=Path)
+    parser.add_argument("--content-history", type=Path, help="已成功内容的 SHA-256 索引，用于拦截换编号的重复视频")
     parser.add_argument("--media-cache", type=Path, help="持久化刷新后的媒体链接")
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--limit", type=int, default=0)
@@ -625,6 +744,7 @@ def main(argv: list[str] | None = None) -> int:
     results_by_key: dict[str, dict[str, object]] = {}
     results_lock = threading.Lock()
     limiter = RateLimiter(args.delay)
+    content_history = ContentHistory(args.content_history)
 
     def process_item(item: dict[str, str]) -> None:
         opener = build_download_opener()
@@ -634,10 +754,10 @@ def main(argv: list[str] | None = None) -> int:
             if item.get("canonical_url") and age is not None and age > args.link_max_age:
                 refresh_media(item, args.timeout, args.retries, _update_dl_item)
             try:
-                result = download_one(opener, item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter)
+                result = download_one(opener, item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter, content_history=content_history)
             except ExpiredMediaError:
                 refresh_media(item, args.timeout, args.retries, _update_dl_item)
-                result = download_one(build_download_opener(), item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter)
+                result = download_one(build_download_opener(), item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter, content_history=content_history)
         except Exception as exc:
             result = {"viewkey": item.get("viewkey"), "status": "failed", "error": str(exc)}
             print(f"[{item.get('viewkey')}] error: {exc}", file=sys.stderr)
@@ -664,7 +784,7 @@ def main(argv: list[str] | None = None) -> int:
         existing = set()
         if args.success_history.exists():
             existing = {line.strip() for line in args.success_history.read_text(encoding="utf-8").splitlines() if line.strip()}
-        existing.update(str(result["viewkey"]) for result in results if result.get("status") in {"downloaded", "skipped"} and result.get("viewkey"))
+        existing.update(str(result["viewkey"]) for result in results if result.get("status") in {"downloaded", "skipped", "duplicate"} and result.get("viewkey"))
         args.success_history.parent.mkdir(parents=True, exist_ok=True)
         temporary_history = args.success_history.with_suffix(args.success_history.suffix + ".tmp")
         temporary_history.write_text("".join(f"{key}\n" for key in sorted(existing)), encoding="utf-8")

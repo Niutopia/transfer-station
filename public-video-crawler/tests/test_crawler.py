@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -200,6 +201,20 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(processing, [])
         self.assertEqual((new_count, retry_count, skipped_count), (0, 0, 1))
 
+    def test_success_history_preserves_cached_media_metadata(self) -> None:
+        history = {
+            "abc12345": crawler.Video(
+                viewkey="abc12345",
+                canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+                media_url="https://media.example.test/known.mp4",
+                resolved_at="2026-07-20T12:00:00+08:00",
+            )
+        }
+        current = [crawler.Video(viewkey="abc12345", canonical_url="https://91porn.com/view_video.php?viewkey=abc12345")]
+        crawler.select_for_processing(current, history, set(), {"abc12345"})
+        self.assertEqual(current[0].media_url, "https://media.example.test/known.mp4")
+        self.assertEqual(current[0].resolved_at, "2026-07-20T12:00:00+08:00")
+
     def test_page_url_preserves_filters_and_replaces_page(self) -> None:
         url = crawler.page_url(
             "https://91porn.com/v.php?category=hot&viewtype=basic&page=9", 2
@@ -301,6 +316,53 @@ class CrawlerTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8")), [fake_result])
             self.assertEqual(history_path.read_text(encoding="utf-8").splitlines(), ["abc12345"])
+
+    def test_content_history_bootstraps_from_download_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            digest = hashlib.sha256(b"known-content").hexdigest()
+            (logs / "download-old.log").write_text(json.dumps({
+                "viewkey": "abc12345",
+                "status": "downloaded",
+                "bytes": 13,
+                "sha256": digest,
+            }) + "\n", encoding="utf-8")
+            history = download.ContentHistory(root / "content.json")
+            self.assertEqual(history.claim(digest, "xyz98765", 13), "abc12345")
+
+    def test_duplicate_content_never_reaches_output_directory(self) -> None:
+        item = {
+            "viewkey": "xyz98765",
+            "media_url": "https://media.example/video.mp4",
+            "canonical_url": "https://91porn.com/view_video.php?viewkey=xyz98765",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            partials = root / "partials"
+            output.mkdir()
+            partials.mkdir()
+            history = download.ContentHistory(root / "content.json")
+            digest = hashlib.sha256(b"same-content").hexdigest()
+            self.assertIsNone(history.claim(digest, "abc12345", 12))
+            response = FakeResponse(b"same-content", headers={"Content-Type": "video/mp4", "Content-Length": "12"})
+            opener = mock.Mock()
+            opener.open.return_value = response
+            result = download.download_one(
+                opener,
+                item,
+                output,
+                partials,
+                timeout=1,
+                max_bytes=1024 * 1024,
+                content_history=history,
+            )
+            self.assertEqual(result["status"], "duplicate")
+            self.assertEqual(result["duplicate_of"], "abc12345")
+            self.assertFalse((output / "xyz98765.mp4").exists())
+            self.assertEqual(list(partials.iterdir()), [])
 
     def test_download_progress_tracks_active_files_and_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
