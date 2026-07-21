@@ -45,6 +45,10 @@ type MonitorData = {
     todayBytes: number;
     totalFiles: number;
     totalBytes: number;
+    todayIngestedFiles: number;
+    todayIngestedBytes: number;
+    ingestedFiles: number;
+    ingestedBytes: number;
     downloadRate: number;
   };
   storage: { usedBytes: number; diskFreeBytes: number; diskTotalBytes: number; diskUsedPercent: number };
@@ -482,10 +486,11 @@ export default function Home() {
 
           <section className="panel trend-panel" aria-labelledby="trend-title">
             <div className="panel-head">
-              <div><h2 id="trend-title">近 7 天入库趋势</h2><p>按“中转站”中文件修改时间统计</p></div>
+              <div><h2 id="trend-title">近 7 天入库趋势</h2><p>按首次成功下载记录统计，删除文件不影响历史</p></div>
               <div className="trend-summary" aria-label="入库摘要">
-                <span><strong>{data.overview.todayFiles}</strong>今日入库</span>
-                <span><strong>{formatBytes(data.overview.totalBytes)}</strong>总容量</span>
+                <span><strong>{data.overview.todayIngestedFiles}</strong>今日入库</span>
+                <span><strong>{nf.format(data.overview.ingestedFiles)}</strong>历史入库</span>
+                <span><strong>{formatBytes(data.overview.ingestedBytes)}</strong>累计下载</span>
               </div>
             </div>
             <div className="trend-chart">

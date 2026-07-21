@@ -38,6 +38,7 @@ docker compose down
 
 视频一旦成功下载，`data/download-success.txt` 就会永久记录它的 `viewkey`。之后即使视频被移出“中转站”或手动删除，后续任务也会直接跳过，不会再次解析或下载。
 内容指纹保存在 `data/download-content-history.json`，首次使用会自动从旧下载日志补齐历史指纹。换编号的重复内容会被记为已处理，但不会落入“中转站”。
+入库趋势使用 `data/download-history.json` 的首次成功下载账本统计；同一 `viewkey` 只记录一次。手动删除视频只会改变当前文件数和磁盘占用，不会减少历史入库数量、累计下载量或对应日期的趋势数据。
 
 只抓取和解析公开页面，不下载：
 
@@ -66,6 +67,7 @@ python3 scripts/run-daily-crawl.py --download --limit 1
 - `public-video-crawler/videos-with-media.json`：最近一次抓取、去重和媒体解析结果。
 - `中转站/`：只存放已完成的视频文件。
 - `data/download-manifest.json`：最近一次下载结果与校验信息。
+- `data/download-history.json`：首次成功下载账本，用于生成不会因文件删除而回退的入库趋势。
 - `data/video-history.json`：跨日视频历史索引，用于避免重复解析和下载。
 - `data/pending-videos.json`：本次新增或需要重试的下载队列。
 - `data/partials/`：下载中的临时 `.part` 分片。

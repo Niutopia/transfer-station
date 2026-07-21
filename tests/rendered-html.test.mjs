@@ -32,6 +32,9 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(status.overview.pendingVideos, status.overview.uniqueVideos - status.overview.downloadedVideos);
   assert.equal(status.overview.rawLinks - status.overview.uniqueVideos, status.overview.duplicatesRemoved);
   assert.equal(status.daily.length, 14);
+  assert.equal(status.overview.ingestedFiles >= status.overview.todayIngestedFiles, true);
+  assert.equal(status.overview.ingestedBytes >= status.overview.todayIngestedBytes, true);
+  assert.equal(status.daily.reduce((total, day) => total + day.files, 0) <= status.overview.ingestedFiles, true);
   assert.equal(Array.isArray(status.recentFiles), true);
   assert.equal(Object.hasOwn(status, "currentProgress"), true);
   assert.equal(Object.hasOwn(status, "lastProgress"), true);
@@ -110,6 +113,7 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /已知字节进度/);
   assert.match(source, /预计剩余/);
   assert.match(source, /断点续传/);
+  assert.match(source, /删除文件不影响历史/);
   assert.match(source, /\/api\/task\/control/);
 });
 

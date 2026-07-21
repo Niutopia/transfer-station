@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from download_history import sync_download_history
 from task_lock import lock_is_active, read_lock
 from task_history import latest_run_event, latest_successful_daily_run
 
@@ -27,6 +28,7 @@ VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
 STAGING_CACHE = DATA / "staging-index-cache.json"
 RUN_HISTORY = DATA / "run-history.jsonl"
 LAST_COMPLETED_PROGRESS = DATA / "last-completed-progress.json"
+DOWNLOAD_HISTORY = DATA / "download-history.json"
 
 
 def iso_from_timestamp(value: float) -> str:
@@ -151,18 +153,25 @@ def main() -> int:
     }
     total_bytes = sum(item["sizeBytes"] for item in files)
     today = now.date()
-    today_files = [item for item in files if datetime.fromtimestamp(item["timestamp"]).astimezone().date() == today]
-    today_bytes = sum(item["sizeBytes"] for item in today_files)
+    current_today_files = [item for item in files if datetime.fromtimestamp(item["timestamp"]).astimezone().date() == today]
+    current_today_bytes = sum(item["sizeBytes"] for item in current_today_files)
+
+    download_history = sync_download_history(DOWNLOAD_HISTORY, DATA / "logs")
+    history_by_day: dict[str, list[dict[str, object]]] = {}
+    for item in download_history:
+        history_by_day.setdefault(str(item.get("date") or ""), []).append(item)
+    today_history = history_by_day.get(today.isoformat(), [])
+    ingested_bytes = sum(int(item.get("bytes") or 0) for item in download_history)
 
     day_rows = []
     for offset in range(13, -1, -1):
         day = today - timedelta(days=offset)
-        matched = [item for item in files if datetime.fromtimestamp(item["timestamp"]).astimezone().date() == day]
+        matched = history_by_day.get(day.isoformat(), [])
         day_rows.append({
             "date": day.isoformat(),
             "label": day.strftime("%m/%d"),
             "files": len(matched),
-            "bytes": sum(item["sizeBytes"] for item in matched),
+            "bytes": sum(int(item.get("bytes") or 0) for item in matched),
         })
 
     types = Counter(item["extension"].lstrip(".").upper() or "OTHER" for item in files)
@@ -301,10 +310,14 @@ def main() -> int:
             "downloadedVideos": downloaded_count,
             "pendingVideos": pending_count,
             "partialDownloads": len(partials),
-            "todayFiles": len(today_files),
-            "todayBytes": today_bytes,
+            "todayFiles": len(current_today_files),
+            "todayBytes": current_today_bytes,
             "totalFiles": len(files),
             "totalBytes": total_bytes,
+            "todayIngestedFiles": len(today_history),
+            "todayIngestedBytes": sum(int(item.get("bytes") or 0) for item in today_history),
+            "ingestedFiles": len(download_history),
+            "ingestedBytes": ingested_bytes,
             "downloadRate": round((downloaded_count / unique_videos * 100), 1) if unique_videos else 0,
         },
         "storage": {

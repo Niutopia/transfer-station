@@ -22,6 +22,7 @@ import task_lock
 import task_history
 import progress_history
 import source_config
+import download_history
 
 
 FIXTURE = """
@@ -70,6 +71,37 @@ class FakeResponse:
 
 
 class CrawlerTests(unittest.TestCase):
+    def test_download_history_survives_file_and_log_deletion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            first_log = logs / "download-20260720-120000.log"
+            first_log.write_text("\n".join([
+                json.dumps({"viewkey": "first", "status": "downloaded", "bytes": 100}),
+                json.dumps({"viewkey": "failed", "status": "failed", "bytes": 200}),
+                "not-json",
+            ]), encoding="utf-8")
+            second_log = logs / "download-20260721-130000.log"
+            second_log.write_text("\n".join([
+                json.dumps({"viewkey": "first", "status": "downloaded", "bytes": 999}),
+                json.dumps({"viewkey": "duplicate", "status": "duplicate", "bytes": 100}),
+                json.dumps({"viewkey": "second", "status": "downloaded", "bytes": 300}),
+            ]), encoding="utf-8")
+
+            index = root / "download-history.json"
+            items = download_history.sync_download_history(index, logs)
+            by_key = {str(item["viewkey"]): item for item in items}
+            self.assertEqual(set(by_key), {"first", "second"})
+            self.assertEqual(by_key["first"]["date"], "2026-07-20")
+            self.assertEqual(by_key["first"]["bytes"], 100)
+            self.assertEqual(by_key["second"]["date"], "2026-07-21")
+
+            first_log.unlink()
+            second_log.unlink()
+            persisted = download_history.sync_download_history(index, logs)
+            self.assertEqual({item["viewkey"] for item in persisted}, {"first", "second"})
+
     def test_source_config_adds_and_removes_validated_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "daily-sources.json"
