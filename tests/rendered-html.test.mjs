@@ -92,7 +92,7 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /new EventSource\("\/api\/events"\)/);
   assert.match(source, /实时更新中/);
   assert.match(source, /已降级为 10 秒轮询/);
-  assert.match(source, /live-task-panel/);
+  assert.doesNotMatch(source, /live-task-panel/);
   assert.match(source, /current-task-panel/);
   assert.doesNotMatch(source, /\{isCrawling && currentProgress && <section className="current-task-panel"/);
   assert.match(source, /等待手动开始任务/);
@@ -103,9 +103,9 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /taskLaunching/);
   assert.match(source, /正在准备抓取任务/);
   assert.match(source, /currentProgress/);
-  assert.match(source, /lastProgress/);
+  assert.doesNotMatch(source, /lastProgress/);
   assert.match(source, /CURRENT TASK/);
-  assert.match(source, /LAST TASK/);
+  assert.doesNotMatch(source, /LAST TASK/);
   assert.match(source, /speedBytesS/);
   assert.match(source, /已知字节进度/);
   assert.match(source, /预计剩余/);

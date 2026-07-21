@@ -90,7 +90,6 @@ type MonitorData = {
   }>;
   progress?: ProgressData | null;
   currentProgress?: ProgressData | null;
-  lastProgress?: ProgressData | null;
 };
 
 const nf = new Intl.NumberFormat("zh-CN");
@@ -398,12 +397,9 @@ export default function Home() {
   const taskAppearsActive = isCrawling || taskLaunching;
   const completedToday = data.latestRun.completedToday === true;
   const currentProgress = data.currentProgress ?? (isCrawling ? data.progress : null);
-  const lastProgress = data.lastProgress ?? (!isCrawling ? data.progress : null);
   const currentPercent = currentProgress?.total ? Math.min(100, currentProgress.done / currentProgress.total * 100) : 0;
-  const lastProgressPercent = lastProgress?.total ? Math.min(100, lastProgress.done / lastProgress.total * 100) : 0;
   const aggregateSpeed = data.activeDownloads.reduce((total, item) => total + (item.speedBytesS ?? 0), 0);
   const currentKnownBytePercent = currentProgress?.bytesTotalKnown ? Math.min(100, (currentProgress.bytesDone ?? 0) / currentProgress.bytesTotalKnown * 100) : 0;
-  const lastKnownBytePercent = lastProgress?.bytesTotalKnown ? Math.min(100, (lastProgress.bytesDone ?? 0) / lastProgress.bytesTotalKnown * 100) : 0;
   const taskPaused = data.latestRun.taskState === "paused";
   const taskResult = data.latestRun.result;
   return (
@@ -483,25 +479,6 @@ export default function Home() {
               })}
             </div>}
           </section>
-
-          {lastProgress && lastProgress.total > 0 && <section className={`live-task-panel stage-${lastProgress.stage}`} aria-labelledby="last-task-title">
-            <div className="live-task-head">
-              <div><span className="live-kicker"><i />LAST TASK</span><h2 id="last-task-title">{progressTitle(lastProgress.stage)}</h2></div>
-              <strong>{lastProgressPercent.toFixed(0)}%</strong>
-            </div>
-            <div className="progress-caption"><span>文件进度</span><strong>{lastProgress.done}/{lastProgress.total}</strong></div>
-            <div className="live-progress" role="progressbar" aria-valuenow={lastProgress.done} aria-valuemin={0} aria-valuemax={lastProgress.total}><i style={{ width: `${lastProgressPercent}%` }} /></div>
-            {(lastProgress.bytesTotalKnown ?? 0) > 0 && <>
-              <div className="progress-caption byte-caption"><span>已知字节进度 · {lastProgress.knownItems ?? 0} 个文件</span><strong>{formatBytes(lastProgress.bytesDone ?? 0)} / {formatBytes(lastProgress.bytesTotalKnown ?? 0)}</strong></div>
-              <div className="live-progress byte-progress" role="progressbar" aria-label="上一任务已知字节进度" aria-valuenow={lastKnownBytePercent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${lastKnownBytePercent}%` }} /></div>
-            </>}
-            <div className="live-stats">
-              <span><small>已完成</small><strong>{lastProgress.done}/{lastProgress.total}</strong></span>
-              <span><small>任务耗时</small><strong>{lastProgress.startedAt && lastProgress.updatedAt ? formatDuration((new Date(lastProgress.updatedAt).getTime() - new Date(lastProgress.startedAt).getTime()) / 1000) : "已记录"}</strong></span>
-              <span><small>下载容量</small><strong>{formatBytes(lastProgress.bytesDone ?? 0)}</strong></span>
-              <span><small>任务结果</small><strong>已完成</strong></span>
-            </div>
-          </section>}
 
           <section className="panel trend-panel" aria-labelledby="trend-title">
             <div className="panel-head">

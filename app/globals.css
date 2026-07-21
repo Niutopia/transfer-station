@@ -296,32 +296,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 .current-byte-caption strong { color: #f8f1dc; }
 .current-download-list { border-color: #718076; }
 
-.live-task-panel {
-  margin-bottom: 24px;
-  padding: 22px 24px;
-  border: 3px solid var(--line);
-  background: #1e2a24;
-  box-shadow: var(--shadow-lg);
-  color: #f8f1dc;
-}
-.live-task-panel.stage-complete { background: #203528; }
-.live-task-panel.stage-failed, .live-task-panel.stage-cancelled { background: #3b2625; }
-.live-task-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
-.live-task-head h2 { margin: 7px 0 0; font-size: 18px; }
-.live-task-head > strong { color: #f6ca54; font-size: 31px; letter-spacing: -.05em; }
-.live-kicker { display: inline-flex; align-items: center; gap: 8px; color: #aee5ba; font-family: var(--font-geist-mono), "SFMono-Regular", Menlo, Monaco, monospace; font-size: 10px; font-weight: 900; letter-spacing: .08em; }
-.live-kicker i { width: 8px; height: 8px; background: #72ce86; animation: pixel-blink 1.3s steps(2, end) infinite; }
-.progress-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; color: #d0ddd2; font-size: 10px; }
-.progress-caption strong { color: #f8f1dc; }
-.progress-caption.byte-caption { margin-top: 13px; }
-.live-progress { height: 14px; margin-top: 7px; padding: 2px; border: 2px solid #f8f1dc; background: #101713; }
-.live-progress i { display: block; height: 100%; background: repeating-linear-gradient(90deg, #72ce86 0 13px, #37794a 13px 16px); transition: width .25s steps(10, end); }
-.live-progress.byte-progress { height: 10px; }
-.live-progress.byte-progress i { background: repeating-linear-gradient(90deg, #819cff 0 11px, #4053a2 11px 14px); }
-.live-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 17px; }
-.live-stats span { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #849087; background: #162019; }
-.live-stats small { color: #d3ddd5; font-size: 10px; }
-.live-stats strong { font-family: var(--font-geist-mono), "SFMono-Regular", Menlo, Monaco, monospace; font-size: 13px; }
 .live-download-list { display: grid; gap: 12px; margin-top: 17px; padding-top: 17px; border-top: 2px dashed #718076; }
 .live-download { display: grid; grid-template-columns: minmax(180px, 1.6fr) minmax(120px, 1fr) 45px; gap: 14px; align-items: center; }
 .live-download-info { min-width: 0; }
@@ -396,7 +370,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
   .app-shell { width: min(100% - 28px, 1540px); padding-top: 16px; }
   .topbar { gap: 14px; }
   .side-column { grid-template-columns: 1fr; }
-  .live-stats { grid-template-columns: repeat(2, 1fr); }
   .current-task-grid { grid-template-columns: repeat(2, 1fr); }
   .current-task-head { align-items: flex-start; flex-direction: column; }
   .current-task-actions { justify-content: flex-start; width: 100%; }
@@ -419,8 +392,6 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
   .trend-chart { gap: 5px; margin-inline: 12px; }
   .trend-track i { width: min(19px, 75%); }
   .footer-note { flex-direction: column; }
-  .live-task-panel { padding: 18px 16px; }
-  .live-task-head > strong { font-size: 25px; }
   .current-task-grid { grid-template-columns: 1fr; }
   .current-task-actions { flex-wrap: wrap; }
   .current-task-actions .highlight-btn { order: -1; width: 100%; }
