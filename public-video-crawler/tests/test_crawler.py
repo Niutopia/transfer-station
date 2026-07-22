@@ -296,6 +296,50 @@ class CrawlerTests(unittest.TestCase):
             ["https://media.example.test/video.mp4?st=opaque&f=opaque"],
         )
 
+    def test_media_extraction_ignores_commented_source_and_preroll(self) -> None:
+        encoded = (
+            "%3Csource%20src%3D%27https%3A%2F%2Fmedia.example.test%2F"
+            "actual.mp4%3Fsecure%3Dopaque%26f%3Dopaque%27%3E"
+        )
+        body = f"""
+        <video id="player_one">
+          <!-- <source src="https://media.example.test/stale.mp4?st=old&f=old"> -->
+          <script>document.write(strencode2("{encoded}"));</script>
+        </video>
+        <script>
+          player.preroll({{src:{{src:"https://ads.example.test/preroll.mp4",type:"video/mp4"}}}});
+        </script>
+        """
+        self.assertEqual(
+            crawler.extract_media_urls(body),
+            ["https://media.example.test/actual.mp4?secure=opaque&f=opaque"],
+        )
+
+    def test_player_identity_rejects_a_mismatched_detail_asset(self) -> None:
+        video = crawler.Video(
+            viewkey="4f13c14d90b0572e3c5c",
+            canonical_url="https://91porn.com/view_video.php?viewkey=4f13c14d90b0572e3c5c",
+            thumbnail_url="https://media.example.test/thumb/1225269.jpg",
+        )
+        with self.assertRaisesRegex(crawler.CrawlerError, "详情页媒体与榜单不一致"):
+            crawler.validate_player_identity(
+                video,
+                ["https://media.example.test/mp43/876125.mp4?st=opaque"],
+                ["https://media.example.test/thumb/876125.jpg"],
+            )
+
+    def test_player_identity_accepts_the_listing_asset(self) -> None:
+        video = crawler.Video(
+            viewkey="4f13c14d90b0572e3c5c",
+            canonical_url="https://91porn.com/view_video.php?viewkey=4f13c14d90b0572e3c5c",
+            thumbnail_url="https://media.example.test/thumb/1225269.jpg",
+        )
+        crawler.validate_player_identity(
+            video,
+            ["https://media.example.test/mp43/1225269.mp4?st=opaque"],
+            ["https://media.example.test/thumb/1225269.jpg"],
+        )
+
     def test_private_network_media_urls_are_rejected(self) -> None:
         body = "https://127.0.0.1/private.mp4 https://192.168.1.2/private.mp4"
         self.assertEqual(crawler.extract_media_urls(body), [])

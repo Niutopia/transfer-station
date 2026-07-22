@@ -148,6 +148,27 @@ class ListingParser(HTMLParser):
             self.current.duration += data
 
 
+class MediaSourceParser(HTMLParser):
+    """Collect only media attached to the page's actual video/source elements."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.urls: list[str] = []
+        self.posters: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() not in {"source", "video"}:
+            return
+        values = {key.lower(): value or "" for key, value in attrs}
+        src = html.unescape(values.get("src", "")).strip()
+        if src and src not in self.urls:
+            self.urls.append(src)
+        if tag.lower() == "video":
+            poster = html.unescape(values.get("poster", "")).strip()
+            if poster and poster not in self.posters:
+                self.posters.append(poster)
+
+
 def normalize_text(value: str) -> str:
     return " ".join(value.split())
 
@@ -396,29 +417,89 @@ def fetch_html(
     raise CrawlerError(f"请求失败: {path}")
 
 
-def extract_media_urls(body: str) -> list[str]:
+def extract_player_media(body: str) -> tuple[list[str], list[str]]:
     decoded_fragments = []
     for encoded in re.findall(r"strencode2?\(\s*[\"']([^\"']+)[\"']", body, re.IGNORECASE):
         try:
             decoded_fragments.append(urllib.parse.unquote(encoded))
         except (UnicodeError, ValueError):
             continue
-    searchable = html.unescape(body + "\n" + "\n".join(decoded_fragments))
-    found: list[str] = []
-    for raw in re.findall(r"https?://[^\"'<>\\\s]+", searchable):
-        raw = raw.rstrip(");,]")
+
+    def accepted(raw: str) -> str:
+        raw = html.unescape(raw).rstrip(");,]")
         try:
             parsed = urllib.parse.urlsplit(raw)
         except ValueError:
-            continue
+            return ""
         extension = Path(parsed.path).suffix.lower()
         if parsed.scheme != "https" or extension not in MEDIA_EXTENSIONS:
-            continue
+            return ""
         if not public_hostname(parsed.hostname or ""):
+            return ""
+        return raw
+
+    # HTMLParser ignores commented-out tags and script contents. Feeding decoded
+    # strencode fragments separately exposes the real player <source> without
+    # admitting preroll URLs embedded in JavaScript.
+    player_sources: list[str] = []
+    player_posters: list[str] = []
+    for fragment in [body, *decoded_fragments]:
+        parser = MediaSourceParser()
+        try:
+            parser.feed(fragment)
+        except (UnicodeError, ValueError):
             continue
-        if raw not in found:
-            found.append(raw)
-    return found
+        for raw in parser.urls:
+            media_url = accepted(raw)
+            if media_url and media_url not in player_sources:
+                player_sources.append(media_url)
+        for raw in parser.posters:
+            poster_url = html.unescape(raw).strip()
+            if poster_url and poster_url not in player_posters:
+                player_posters.append(poster_url)
+    if player_sources:
+        return player_sources, player_posters
+
+    # Keep a fallback for older page variants that expose only a raw media URL,
+    # but remove HTML comments so stale sample sources cannot win selection.
+    uncommented = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    searchable = html.unescape(uncommented + "\n" + "\n".join(decoded_fragments))
+    found: list[str] = []
+    for raw in re.findall(r"https?://[^\"'<>\\\s]+", searchable):
+        media_url = accepted(raw)
+        if media_url and media_url not in found:
+            found.append(media_url)
+    return found, player_posters
+
+
+def extract_media_urls(body: str) -> list[str]:
+    return extract_player_media(body)[0]
+
+
+def media_asset_identifier(url: str) -> str:
+    """Return a stable numeric asset id from a media/thumbnail path when present."""
+    try:
+        stem = Path(urllib.parse.urlsplit(url).path).stem
+    except ValueError:
+        return ""
+    match = re.fullmatch(r"(\d+)", stem)
+    return match.group(1) if match else ""
+
+
+def validate_player_identity(video: Video, sources: list[str], posters: list[str]) -> None:
+    """Reject a detail response that serves a different asset for the requested video."""
+    expected = media_asset_identifier(video.thumbnail_url)
+    if not expected:
+        return
+    observed = {
+        identifier
+        for identifier in (media_asset_identifier(url) for url in [*posters, *sources])
+        if identifier
+    }
+    if observed and expected not in observed:
+        raise CrawlerError(
+            f"详情页媒体与榜单不一致（viewkey={video.viewkey}，期望资源 {expected}，实际 {sorted(observed)[0]}）"
+        )
 
 
 def public_hostname(hostname: str) -> bool:
@@ -502,7 +583,9 @@ def resolve_media(
                 retries=retries,
                 rate_limiter=rate_limiter,
             )
-            video.media_url = choose_media_url(extract_media_urls(body))
+            sources, posters = extract_player_media(body)
+            validate_player_identity(video, sources, posters)
+            video.media_url = choose_media_url(sources)
             video.resolved_at = time.strftime("%Y-%m-%dT%H:%M:%S%z") if video.media_url else ""
         finally:
             with done_lock:
