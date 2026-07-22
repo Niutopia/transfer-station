@@ -42,6 +42,12 @@ class CrawlerError(RuntimeError):
     pass
 
 
+class MediaMismatchError(CrawlerError):
+    """The detail page served media that does not belong to the listing item."""
+
+    pass
+
+
 @dataclass
 class Candidate:
     viewkey: str
@@ -497,7 +503,7 @@ def validate_player_identity(video: Video, sources: list[str], posters: list[str
         if identifier
     }
     if observed and expected not in observed:
-        raise CrawlerError(
+        raise MediaMismatchError(
             f"详情页媒体与榜单不一致（viewkey={video.viewkey}，期望资源 {expected}，实际 {sorted(observed)[0]}）"
         )
 
@@ -565,6 +571,13 @@ def resolve_media(
     worker_state = threading.local()
     failures: list[dict[str, str]] = []
 
+    def failure_record(video: Video, exc: Exception) -> dict[str, str]:
+        return {
+            "viewkey": video.viewkey,
+            "error": str(exc),
+            "kind": "media_mismatch" if isinstance(exc, MediaMismatchError) else "resolve_error",
+        }
+
     def worker_opener() -> urllib.request.OpenerDirector:
         current = getattr(worker_state, "opener", None)
         if current is None:
@@ -599,7 +612,7 @@ def resolve_media(
             except Exception as exc:
                 if not continue_on_error:
                     raise
-                failures.append({"viewkey": video.viewkey, "error": str(exc)})
+                failures.append(failure_record(video, exc))
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
             futures = {pool.submit(resolve_one, i, video): video for i, video in enumerate(videos)}
@@ -609,7 +622,7 @@ def resolve_media(
                 except Exception as exc:
                     if not continue_on_error:
                         raise
-                    failures.append({"viewkey": futures[future].viewkey, "error": str(exc)})
+                    failures.append(failure_record(futures[future], exc))
     return failures
 
 

@@ -486,6 +486,22 @@ class CrawlerTests(unittest.TestCase):
             with self.assertRaises(crawler.CrawlerError):
                 crawler.resolve_media(crawler.build_opener(), videos, timeout=1, delay=0, user_agent="test", concurrency=2)
 
+    def test_media_mismatch_is_reported_as_a_safe_block(self) -> None:
+        videos = [
+            crawler.Video(viewkey="abc12345", canonical_url="https://91porn.com/view_video.php?viewkey=abc12345"),
+        ]
+        with mock.patch.object(crawler, "fetch_html", side_effect=crawler.MediaMismatchError("详情页媒体与榜单不一致")):
+            failures = crawler.resolve_media(
+                crawler.build_opener(),
+                videos,
+                timeout=1,
+                delay=0,
+                user_agent="test",
+                concurrency=1,
+                continue_on_error=True,
+            )
+        self.assertEqual(failures[0]["kind"], "media_mismatch")
+
     def test_resume_restarts_when_content_range_does_not_match(self) -> None:
         item = {
             "viewkey": "abc12345",

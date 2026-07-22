@@ -151,6 +151,23 @@ def main() -> int:
         for video in videos
         if isinstance(video, dict) and video.get("viewkey") and (video.get("media_url") or str(video.get("viewkey")) in completed_keys)
     }
+    resolve_failures = metadata.get("resolve_failures") if isinstance(metadata, dict) else []
+    if not isinstance(resolve_failures, list):
+        resolve_failures = []
+    mismatch_failure_keys = {
+        str(item.get("viewkey"))
+        for item in resolve_failures
+        if isinstance(item, dict)
+        and item.get("viewkey")
+        and (
+            item.get("kind") == "media_mismatch"
+            or "详情页媒体与榜单不一致" in str(item.get("error") or "")
+        )
+    }
+    unresolved_keys = listed_keys - resolved_keys
+    blocked_keys = unresolved_keys & mismatch_failure_keys
+    unresolved_error_keys = unresolved_keys - blocked_keys
+    blocked_count = len(blocked_keys)
     total_bytes = sum(item["sizeBytes"] for item in files)
     today = now.date()
     current_today_files = [item for item in files if datetime.fromtimestamp(item["timestamp"]).astimezone().date() == today]
@@ -189,8 +206,14 @@ def main() -> int:
         alerts.append({"level": "error", "title": "缺少抓取快照", "detail": "尚未找到 videos-with-media.json。"})
     elif crawl_age_hours is not None and crawl_age_hours > 26:
         alerts.append({"level": "warning", "title": "抓取数据已过期", "detail": f"最近抓取距今 {crawl_age_hours:.1f} 小时。"})
-    if len(resolved_keys) < len(listed_keys):
-        alerts.append({"level": "warning", "title": "存在未解析媒体", "detail": f"{len(listed_keys) - len(resolved_keys)} 个条目缺少媒体地址。"})
+    if blocked_count:
+        alerts.append({
+            "level": "success",
+            "title": f"已拦截 {blocked_count} 个错误媒体地址",
+            "detail": "播放器资源与榜单不一致，已停止下载，不会写入中转站。",
+        })
+    if unresolved_error_keys:
+        alerts.append({"level": "warning", "title": "存在未解析媒体", "detail": f"{len(unresolved_error_keys)} 个条目因解析错误缺少媒体地址。"})
     if partials and not is_crawling:
         alerts.append({"level": "warning", "title": "发现未完成下载", "detail": f"临时目录有 {len(partials)} 个 .part 文件。"})
     unresolved_manifest_failures = [item for item in manifest_failures if str(item.get("viewkey") or "") not in completed_keys]
@@ -271,19 +294,21 @@ def main() -> int:
     unique_videos = int(metadata.get("unique_videos") or len(listed_keys))
     resolved_count = len(resolved_keys)
     downloaded_count = len(completed_keys)
-    pending_count = max(0, unique_videos - downloaded_count)
+    handled_resolve_count = resolved_count + blocked_count
+    handled_download_count = downloaded_count + blocked_count
+    pending_count = max(0, unique_videos - handled_download_count)
     raw_links = int(metadata.get("raw_detail_links") or unique_videos)
     duplicates = int(metadata.get("duplicates_removed") or max(0, raw_links - unique_videos))
     has_attention = any(alert.get("level") in {"warning", "error"} for alert in alerts)
-    run_status = "active" if is_crawling else ("ready" if unique_videos and downloaded_count == unique_videos and not has_attention else "attention")
+    run_status = "active" if is_crawling else ("ready" if unique_videos and handled_download_count == unique_videos and not has_attention else "attention")
     completed_run = latest_successful_daily_run(RUN_HISTORY, today=today)
     latest_event = latest_run_event(RUN_HISTORY)
     completed_today = bool(
         completed_run
         and not is_crawling
         and unique_videos
-        and resolved_count == unique_videos
-        and downloaded_count == unique_videos
+        and handled_resolve_count == unique_videos
+        and handled_download_count == unique_videos
         and not partials
     )
 
@@ -308,6 +333,7 @@ def main() -> int:
             "duplicatesRemoved": duplicates,
             "resolvedVideos": resolved_count,
             "downloadedVideos": downloaded_count,
+            "blockedVideos": blocked_count,
             "pendingVideos": pending_count,
             "partialDownloads": len(partials),
             "todayFiles": len(current_today_files),
@@ -350,14 +376,19 @@ def main() -> int:
                 "retryVideos": int((latest_event or {}).get("retryVideos") or 0),
                 "downloadedVideos": int((latest_event or {}).get("downloadedVideos") or 0),
                 "duplicateVideos": int((latest_event or {}).get("duplicateVideos") or 0),
+                "blockedVideos": int(
+                    latest_event.get("blockedVideos")
+                    if latest_event and "blockedVideos" in latest_event
+                    else blocked_count
+                ),
                 "failedVideos": int((latest_event or {}).get("failedVideos") or 0),
                 "downloadedBytes": int((latest_event or {}).get("downloadedBytes") or 0),
             },
             "stages": [
                 {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},
                 {"name": "去重", "status": "active" if is_crawling else ("done" if unique_videos else "waiting"), "value": unique_videos, "note": f"移除 {duplicates} 个重复"},
-                {"name": "媒体解析", "status": "active" if is_crawling else ("done" if resolved_count == unique_videos and unique_videos else "attention"), "value": resolved_count, "note": f"共 {unique_videos} 个唯一视频"},
-                {"name": "下载入库", "status": "done" if downloaded_count == unique_videos and unique_videos else "active" if is_crawling else "attention" if partials else "waiting", "value": downloaded_count, "note": f"目标目录：{STAGING.name}"},
+                {"name": "媒体解析", "status": "active" if is_crawling else ("done" if handled_resolve_count == unique_videos and unique_videos else "attention"), "value": resolved_count, "note": f"已解析 {resolved_count}，安全拦截 {blocked_count}" if blocked_count else f"共 {unique_videos} 个唯一视频"},
+                {"name": "下载入库", "status": "done" if handled_download_count == unique_videos and unique_videos else "active" if is_crawling else "attention" if partials else "waiting", "value": downloaded_count, "note": f"目标目录：{STAGING.name}"},
             ],
         },
         "alerts": alerts,

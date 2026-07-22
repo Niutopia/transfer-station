@@ -39,6 +39,7 @@ type MonitorData = {
     duplicatesRemoved: number;
     resolvedVideos: number;
     downloadedVideos: number;
+    blockedVideos: number;
     pendingVideos: number;
     partialDownloads: number;
     todayFiles: number;
@@ -72,6 +73,7 @@ type MonitorData = {
       retryVideos: number;
       downloadedVideos: number;
       duplicateVideos: number;
+      blockedVideos: number;
       failedVideos: number;
       downloadedBytes: number;
     };
@@ -562,9 +564,9 @@ export default function Home() {
                 <span><small>检查链接</small><strong>{nf.format(taskResult.rawLinks)}</strong></span>
                 <span><small>新发现</small><strong>{nf.format(taskResult.newVideos)}</strong></span>
                 <span><small>本次入库</small><strong>{nf.format(taskResult.downloadedVideos)}</strong></span>
-                <span><small>{taskResult.failedVideos ? "失败" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
+                <span><small>{taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
               </div>
-              <p className="task-result-detail">去重后 {nf.format(taskResult.uniqueVideos)} 个视频，跳过 {nf.format(taskResult.skippedVideos)} 个已知编号{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
+              <p className="task-result-detail">去重后 {nf.format(taskResult.uniqueVideos)} 个视频，跳过 {nf.format(taskResult.skippedVideos)} 个已知编号{taskResult.blockedVideos ? `，安全拦截 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
               <div className="task-result-time"><span>完成于 {clock(taskResult.finishedAt ?? null)}</span><span>{taskResult.durationSeconds ? `耗时 ${formatDuration(taskResult.durationSeconds)}` : "耗时未记录"}</span></div>
             </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
             {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}

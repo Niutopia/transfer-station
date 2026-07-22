@@ -150,6 +150,18 @@ def main() -> int:
     downloaded_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") in {"downloaded", "skipped"})
     duplicate_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "duplicate")
     failed_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "failed")
+    resolve_failures = pending_metadata.get("resolve_failures") if isinstance(pending_metadata, dict) else []
+    if not isinstance(resolve_failures, list):
+        resolve_failures = []
+    blocked_videos = sum(
+        1
+        for item in resolve_failures
+        if isinstance(item, dict)
+        and (
+            item.get("kind") == "media_mismatch"
+            or "详情页媒体与榜单不一致" in str(item.get("error") or "")
+        )
+    )
     downloaded_bytes = sum(int(item.get("bytes") or 0) for item in manifest_results if isinstance(item, dict) and item.get("status") == "downloaded")
     event = {
         "timestamp": task_finished_at.isoformat(timespec="seconds"),
@@ -167,6 +179,7 @@ def main() -> int:
         "retryVideos": int(pending_metadata.get("retry_videos") or 0) if args.download else None,
         "downloadedVideos": downloaded_videos,
         "duplicateVideos": duplicate_videos,
+        "blockedVideos": blocked_videos,
         "failedVideos": failed_videos,
         "downloadedBytes": downloaded_bytes,
     }
