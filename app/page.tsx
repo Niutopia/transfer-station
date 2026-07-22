@@ -172,6 +172,8 @@ export default function Home() {
   const [sourceFeedback, setSourceFeedback] = useState("");
   const [sourceError, setSourceError] = useState("");
   const abortControllerRef = useRef<AbortController | null>(null);
+  const realtimeEverConnectedRef = useRef(false);
+  const reloadAfterReconnectRef = useRef(false);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -349,8 +351,14 @@ export default function Home() {
     if (!autoRefresh) return;
     const source = new EventSource("/api/events");
     source.onopen = () => {
+      if (reloadAfterReconnectRef.current) {
+        window.location.reload();
+        return;
+      }
+      realtimeEverConnectedRef.current = true;
       setRealtimeConnected(true);
       setServiceOnline(true);
+      void load();
     };
     source.addEventListener("status", (event) => {
       try {
@@ -363,9 +371,12 @@ export default function Home() {
         setRealtimeConnected(false);
       }
     });
-    source.onerror = () => setRealtimeConnected(false);
+    source.onerror = () => {
+      if (realtimeEverConnectedRef.current) reloadAfterReconnectRef.current = true;
+      setRealtimeConnected(false);
+    };
     return () => source.close();
-  }, [autoRefresh]);
+  }, [autoRefresh, load]);
 
   useEffect(() => {
     if (!autoRefresh || realtimeConnected) return;

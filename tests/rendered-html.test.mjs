@@ -93,6 +93,7 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
 test("dashboard uses realtime events with a polling fallback", async () => {
   const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(source, /new EventSource\("\/api\/events"\)/);
+  assert.match(source, /window\.location\.reload\(\)/);
   assert.match(source, /实时更新中/);
   assert.match(source, /已降级为 10 秒轮询/);
   assert.doesNotMatch(source, /live-task-panel/);
