@@ -30,6 +30,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(status.overview.resolvedVideos <= status.overview.uniqueVideos, true);
   assert.equal(status.overview.downloadedVideos <= status.overview.uniqueVideos, true);
   assert.equal(status.overview.pendingVideos, status.overview.uniqueVideos - status.overview.downloadedVideos - status.overview.blockedVideos);
+  assert.equal(status.overview.repairableVideos, status.overview.pendingVideos);
   assert.equal(status.overview.rawLinks - status.overview.uniqueVideos, status.overview.duplicatesRemoved);
   assert.equal(status.daily.length, 14);
   assert.equal(status.overview.ingestedFiles >= status.overview.todayIngestedFiles, true);
@@ -67,8 +68,12 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(source, /视频库|role="tablist"|activeTab|selectTab|window\.location\.hash/);
   assert.doesNotMatch(source, /\{ id: "runs", label:/);
   assert.doesNotMatch(source, /className="panel run-panel"/);
-  assert.match(source, /!taskAppearsActive && <button/);
+  assert.match(source, /!taskAppearsActive && <>/);
   assert.match(source, /再次抓取最新内容/);
+  assert.match(source, /修复 \$\{data\.overview\.repairableVideos\} 个失败项/);
+  assert.match(source, /\/api\/task\/repair/);
+  assert.match(source, /未重新抓取榜单/);
+  assert.doesNotMatch(source, /处理 \$\{data\.overview\.pendingVideos\} 个待办/);
   assert.doesNotMatch(source, /payload\.code === "completed_today"|!completedToday && <button/);
   assert.match(source, /src="\/transfer-station-x\.svg\?v=1"/);
   assert.match(source, /className="brand-title">TRANSFER STATION/);
@@ -136,6 +141,8 @@ test("crawl sources can be managed safely from the dashboard", async () => {
   assert.match(taskService, /source_edit_blocked/);
   assert.match(taskService, /do_DELETE/);
   assert.match(taskService, /no_sources/);
+  assert.match(taskService, /\/api\/task\/repair/);
+  assert.match(taskService, /repair_pending\.py/);
 
   const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
   assert.match(compose, /\.\/config:\/app\/config\s/);

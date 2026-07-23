@@ -278,6 +278,7 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 .current-task-actions { display: flex; align-items: center; justify-content: flex-end; gap: 11px; }
 .current-task-actions .secondary { border-color: #f8f1dc; box-shadow: 3px 3px 0 #101713; color: var(--ink); }
 .current-task-actions .secondary.danger { color: #812f2a; }
+.current-task-actions .secondary.repair-btn { background: #f2dda5; color: #563d08; }
 .current-task-actions .secondary.highlight-btn { color: #fff; }
 .current-task-actions .status { border-color: #f8f1dc; }
 .current-kicker { display: inline-flex; align-items: center; gap: 8px; color: #aee5ba; font-family: var(--font-geist-mono), "SFMono-Regular", Menlo, Monaco, monospace; font-size: 10px; font-weight: 900; letter-spacing: .08em; }

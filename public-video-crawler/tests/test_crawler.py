@@ -23,6 +23,7 @@ import task_history
 import progress_history
 import source_config
 import download_history
+import repair_pending
 
 
 FIXTURE = """
@@ -247,6 +248,25 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(current[0].media_url, "https://media.example.test/known.mp4")
         self.assertEqual(current[0].resolved_at, "2026-07-20T12:00:00+08:00")
 
+    def test_repair_candidates_exclude_completed_and_safety_blocked_items(self) -> None:
+        snapshot = {
+            "metadata": {
+                "resolve_failures": [{
+                    "viewkey": "blocked",
+                    "kind": "media_mismatch",
+                    "error": "详情页媒体与榜单不一致",
+                }],
+            },
+            "videos": [
+                {"viewkey": "completed", "canonical_url": "https://91porn.com/view_video.php?viewkey=completed"},
+                {"viewkey": "blocked", "canonical_url": "https://91porn.com/view_video.php?viewkey=blocked"},
+                {"viewkey": "retry", "canonical_url": "https://91porn.com/view_video.php?viewkey=retry"},
+            ],
+        }
+        candidates, blocked = repair_pending.collect_repair_candidates(snapshot, {"completed"})
+        self.assertEqual([item["viewkey"] for item in candidates], ["retry"])
+        self.assertEqual(blocked, {"blocked"})
+
     def test_page_url_preserves_filters_and_replaces_page(self) -> None:
         url = crawler.page_url(
             "https://91porn.com/v.php?category=hot&viewtype=basic&page=9", 2
@@ -354,6 +374,18 @@ class CrawlerTests(unittest.TestCase):
             path = Path(directory) / "input.json"
             path.write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(len(download.load_items(path)), 1)
+
+    def test_download_loader_preserves_thumbnail_for_identity_validation(self) -> None:
+        payload = {"videos": [{
+            "viewkey": "abc12345",
+            "media_url": "https://media.example/a.mp4",
+            "canonical_url": "https://91porn.com/view_video.php?viewkey=abc12345",
+            "thumbnail_url": "https://media.example/thumb/123.jpg",
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(download.load_items(path)[0]["thumbnail_url"], payload["videos"][0]["thumbnail_url"])
 
     def test_download_loader_rejects_out_of_scope_referer(self) -> None:
         payload = {"videos": [{
@@ -488,7 +520,12 @@ class CrawlerTests(unittest.TestCase):
 
     def test_media_mismatch_is_reported_as_a_safe_block(self) -> None:
         videos = [
-            crawler.Video(viewkey="abc12345", canonical_url="https://91porn.com/view_video.php?viewkey=abc12345"),
+            crawler.Video(
+                viewkey="abc12345",
+                canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+                media_url="https://media.example.test/stale.mp4",
+                resolved_at="2026-07-20T12:00:00+08:00",
+            ),
         ]
         with mock.patch.object(crawler, "fetch_html", side_effect=crawler.MediaMismatchError("详情页媒体与榜单不一致")):
             failures = crawler.resolve_media(
@@ -501,6 +538,8 @@ class CrawlerTests(unittest.TestCase):
                 continue_on_error=True,
             )
         self.assertEqual(failures[0]["kind"], "media_mismatch")
+        self.assertEqual(videos[0].media_url, "")
+        self.assertEqual(videos[0].resolved_at, "")
 
     def test_resume_restarts_when_content_range_does_not_match(self) -> None:
         item = {

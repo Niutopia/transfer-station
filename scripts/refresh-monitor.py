@@ -335,6 +335,7 @@ def main() -> int:
             "downloadedVideos": downloaded_count,
             "blockedVideos": blocked_count,
             "pendingVideos": pending_count,
+            "repairableVideos": pending_count,
             "partialDownloads": len(partials),
             "todayFiles": len(current_today_files),
             "todayBytes": current_today_bytes,
@@ -358,6 +359,11 @@ def main() -> int:
             "status": run_status,
             "startedAt": str(lock_payload.get("startedAt") or latest_crawl_at) if is_crawling else latest_crawl_at,
             "taskState": lock_payload.get("state") if lock_payload else None,
+            "taskKind": (
+                "repair"
+                if str(lock_payload.get("task") or "").startswith("repair-")
+                else "crawl" if lock_payload else str((latest_event or {}).get("taskType") or "crawl")
+            ),
             "taskControllable": bool(lock_payload.get("controllable")) if lock_payload else False,
             "completedToday": completed_today,
             "completedAt": completed_run.get("timestamp") if completed_today and completed_run else None,
@@ -366,6 +372,7 @@ def main() -> int:
                     "success" if latest_event and latest_event.get("crawlExitCode") == 0 and latest_event.get("downloadExitCode") in {0, None}
                     else "failed" if latest_event else "none"
                 ),
+                "taskType": str((latest_event or {}).get("taskType") or "crawl"),
                 "startedAt": latest_event.get("startedAt") if latest_event else None,
                 "finishedAt": latest_event.get("timestamp") if latest_event else None,
                 "durationSeconds": latest_event.get("durationSeconds") if latest_event else None,
@@ -405,15 +412,18 @@ def main() -> int:
                 "stage": crawl_progress.get("stage", "resolving"),
                 "done": int(crawl_progress.get("done", 0)),
                 "total": int(crawl_progress.get("total", 0)),
+                "mode": "repair" if str(lock_payload.get("task") or "").startswith("repair-") else "crawl",
             }
         elif isinstance(download_progress, dict) and download_progress.get("stage") not in {"complete", "failed", "cancelled"}:
             current_progress = serialize_download_progress(download_progress)
+            current_progress["mode"] = "repair" if str(lock_payload.get("task") or "").startswith("repair-") else "crawl"
         else:
             current_progress = {
                 "stage": str(lock_payload.get("phase") or "crawling"),
                 "done": 0,
                 "total": 0,
                 "startedAt": lock_payload.get("startedAt"),
+                "mode": "repair" if str(lock_payload.get("task") or "").startswith("repair-") else "crawl",
             }
 
     last_progress_payload = None

@@ -305,6 +305,7 @@ def load_items(path: Path) -> list[dict[str, str]]:
             "viewkey": viewkey,
             "media_url": media_url,
             "canonical_url": canonical_url,
+            "thumbnail_url": str(raw.get("thumbnail_url") or ""),
             "resolved_at": str(raw.get("resolved_at") or ""),
         })
         seen_keys.add(viewkey)
@@ -660,7 +661,11 @@ def refresh_media(item: dict[str, str], timeout: float, retries: int, progress_c
 
     final = Path(f"{item['viewkey']}{extension_for(item['media_url'])}")
     _report(progress_callback, item, final, state="refreshing", message="正在刷新过期链接", retries=retries)
-    video = crawler.Video(viewkey=item["viewkey"], canonical_url=item.get("canonical_url") or crawler.canonical_video_url(crawler.DEFAULT_URL, item["viewkey"]))
+    video = crawler.Video(
+        viewkey=item["viewkey"],
+        canonical_url=item.get("canonical_url") or crawler.canonical_video_url(crawler.DEFAULT_URL, item["viewkey"]),
+        thumbnail_url=item.get("thumbnail_url", ""),
+    )
     crawler.resolve_media(
         crawler.build_opener(),
         [video],

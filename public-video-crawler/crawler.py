@@ -588,6 +588,10 @@ def resolve_media(
     def resolve_one(index: int, video: Video) -> None:
         global _progress_done
         try:
+            # A failed refresh must never leave a previously signed media URL in
+            # place; otherwise a blocked mismatch could still reach download.py.
+            video.media_url = ""
+            video.resolved_at = ""
             body = fetch_html(
                 opener if concurrency <= 1 else worker_opener(),
                 video.canonical_url,

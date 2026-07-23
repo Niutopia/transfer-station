@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, useRef, type FormEvent } fro
 
 type ProgressData = {
   stage: string;
+  mode?: "crawl" | "repair";
   done: number;
   total: number;
   active?: Array<{
@@ -41,6 +42,7 @@ type MonitorData = {
     downloadedVideos: number;
     blockedVideos: number;
     pendingVideos: number;
+    repairableVideos: number;
     partialDownloads: number;
     todayFiles: number;
     todayBytes: number;
@@ -58,11 +60,13 @@ type MonitorData = {
     status: "ready" | "attention" | "active";
     startedAt: string | null;
     taskState?: "running" | "paused" | "cancelling" | null;
+    taskKind?: "crawl" | "repair" | null;
     taskControllable?: boolean;
     completedToday?: boolean;
     completedAt?: string | null;
     result?: {
       status: "active" | "success" | "failed" | "none";
+      taskType?: "crawl" | "repair";
       startedAt?: string | null;
       finishedAt?: string | null;
       durationSeconds?: number | null;
@@ -159,7 +163,7 @@ export default function Home() {
   const [error, setError] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [startingTask, setStartingTask] = useState(false);
+  const [startingTask, setStartingTask] = useState<"crawl" | "repair" | null>(null);
   const [taskLaunching, setTaskLaunching] = useState(false);
   const [taskMessage, setTaskMessage] = useState("");
   const [serviceOnline, setServiceOnline] = useState<boolean | null>(null);
@@ -234,14 +238,14 @@ export default function Home() {
     }
   }, []);
 
-  const startTask = useCallback(async () => {
-    setStartingTask(true);
+  const startTask = useCallback(async (mode: "crawl" | "repair") => {
+    setStartingTask(mode);
     setTaskLaunching(true);
     setTaskError("");
     setTaskMessage("");
     setSourceFeedback("");
     try {
-      const response = await fetch('/api/task', { method: 'POST' });
+      const response = await fetch(mode === "repair" ? "/api/task/repair" : "/api/task", { method: "POST" });
       const payload = await response.json().catch(() => ({})) as { error?: string; code?: string };
       if (payload.code === "no_sources") {
         setServiceOnline(true);
@@ -257,7 +261,7 @@ export default function Home() {
       }
       if (!response.ok) throw new Error(payload.error || '无法启动任务');
       setServiceOnline(true);
-      setTaskMessage("任务已启动，状态会自动更新");
+      setTaskMessage(mode === "repair" ? "失败项修复已启动，不会重新抓取榜单" : "抓取任务已启动，状态会自动更新");
       window.setTimeout(() => void load(), 120);
       window.setTimeout(() => setTaskLaunching(false), 8_000);
     } catch {
@@ -265,7 +269,7 @@ export default function Home() {
       setTaskLaunching(false);
       setTaskError("任务服务未连接。历史状态仍可查看，但暂时不能启动新任务。");
     } finally {
-      setStartingTask(false);
+      setStartingTask(null);
     }
   }, [load]);
 
@@ -418,7 +422,9 @@ export default function Home() {
   const aggregateSpeed = data.activeDownloads.reduce((total, item) => total + (item.speedBytesS ?? 0), 0);
   const currentKnownBytePercent = currentProgress?.bytesTotalKnown ? Math.min(100, (currentProgress.bytesDone ?? 0) / currentProgress.bytesTotalKnown * 100) : 0;
   const taskPaused = data.latestRun.taskState === "paused";
+  const repairing = taskAppearsActive && (data.latestRun.taskKind === "repair" || currentProgress?.mode === "repair");
   const taskResult = data.latestRun.result;
+  const resultIsRepair = taskResult?.taskType === "repair";
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -463,20 +469,30 @@ export default function Home() {
                   <button className="secondary" type="button" disabled={taskControlling} onClick={() => void controlTask(taskPaused ? "resume" : "pause")}>{taskPaused ? "继续任务" : "暂停任务"}</button>
                   <button className="secondary danger" type="button" disabled={taskControlling} onClick={() => void controlTask("cancel")}>取消任务</button>
                 </>}
-                {!taskAppearsActive && <button
-                  className="secondary highlight-btn"
-                  type="button"
-                  onClick={startTask}
-                  disabled={startingTask || serviceOnline === false || data.source.listingCount === 0}
-                >
-                  {data.source.listingCount === 0 ? "请先添加抓取链接" : serviceOnline === false ? "任务服务离线" : startingTask ? "正在启动…" : data.overview.pendingVideos > 0 ? `处理 ${data.overview.pendingVideos} 个待办` : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
-                </button>}
+                {!taskAppearsActive && <>
+                  {data.overview.repairableVideos > 0 && <button
+                    className="secondary repair-btn"
+                    type="button"
+                    onClick={() => void startTask("repair")}
+                    disabled={startingTask !== null || serviceOnline === false}
+                  >
+                    {serviceOnline === false ? "任务服务离线" : startingTask === "repair" ? "正在启动修复…" : `修复 ${data.overview.repairableVideos} 个失败项`}
+                  </button>}
+                  <button
+                    className="secondary highlight-btn"
+                    type="button"
+                    onClick={() => void startTask("crawl")}
+                    disabled={startingTask !== null || serviceOnline === false || data.source.listingCount === 0}
+                  >
+                    {data.source.listingCount === 0 ? "请先添加抓取链接" : serviceOnline === false ? "任务服务离线" : startingTask === "crawl" ? "正在启动抓取…" : completedToday ? "再次抓取最新内容" : "开始抓取任务"}
+                  </button>
+                </>}
               </div>
             </div>
             <div className="current-task-grid">
               <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "任务准备" : !isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
-              <span><small>抓取范围</small><strong>{data.source.listingCount} 榜 × {data.source.pagesPerListing} 页</strong></span>
-              <span><small>处理进度</small><strong>{taskLaunching && !isCrawling ? "正在连接" : isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.pendingVideos > 0 ? `${data.overview.pendingVideos} 个待处理` : "暂无任务"}</strong></span>
+              <span><small>{repairing ? "修复范围" : "抓取范围"}</small><strong>{repairing ? `${data.overview.repairableVideos} 个失败项` : `${data.source.listingCount} 榜 × ${data.source.pagesPerListing} 页`}</strong></span>
+              <span><small>处理进度</small><strong>{taskLaunching && !isCrawling ? "正在连接" : isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.repairableVideos > 0 ? `${data.overview.repairableVideos} 个可修复` : "暂无任务"}</strong></span>
               <span><small>启动时间</small><strong>{taskLaunching && !isCrawling ? "刚刚" : isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : "等待手动启动"}</strong></span>
             </div>
             {taskAppearsActive && <div className={`current-task-track ${(taskLaunching || currentProgress?.total === 0) ? "indeterminate" : ""}`} role={isCrawling && (currentProgress?.total ?? 0) > 0 ? "progressbar" : undefined} aria-valuenow={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.done : undefined} aria-valuemin={isCrawling && (currentProgress?.total ?? 0) > 0 ? 0 : undefined} aria-valuemax={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.total : undefined}><i style={isCrawling && (currentProgress?.total ?? 0) > 0 ? { width: `${currentPercent}%` } : undefined} /></div>}
@@ -564,20 +580,20 @@ export default function Home() {
               <h2 id="task-result-title">本次任务结果</h2>
               <span className={`status ${taskAppearsActive ? "active" : taskResult?.status === "failed" ? "attention" : "done"}`}>{taskAppearsActive ? "进行中" : taskResult?.status === "failed" ? "失败" : taskResult?.status === "success" ? "已完成" : "暂无"}</span>
             </div>
-            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "failed" ? "任务未能完整完成" : "尚未运行任务"}</strong>
+            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? resultIsRepair ? "失败项修复完成" : taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "failed" ? resultIsRepair ? "部分失败项仍需处理" : "任务未能完整完成" : "尚未运行任务"}</strong>
             {taskAppearsActive ? <div className="task-result-grid">
-              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "准备中" : currentProgress?.stage === "downloading" ? "下载入库" : currentProgress?.stage === "resolving" ? "媒体解析" : "榜单抓取"}</strong></span>
+              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "准备中" : currentProgress?.stage === "downloading" ? "下载入库" : currentProgress?.stage === "resolving" ? "媒体解析" : repairing ? "修复准备" : "榜单抓取"}</strong></span>
               <span><small>处理进度</small><strong>{currentProgress?.total ? `${currentProgress.done}/${currentProgress.total}` : "计算中"}</strong></span>
               <span><small>活动下载</small><strong>{data.activeDownloads.length}</strong></span>
               <span><small>实时速度</small><strong>{formatBytes(currentProgress?.speedBytesS ?? aggregateSpeed)}/s</strong></span>
             </div> : taskResult && taskResult.status !== "none" ? <>
               <div className="task-result-grid">
-                <span><small>检查链接</small><strong>{nf.format(taskResult.rawLinks)}</strong></span>
-                <span><small>新发现</small><strong>{nf.format(taskResult.newVideos)}</strong></span>
+                <span><small>{resultIsRepair ? "待修复" : "检查链接"}</small><strong>{nf.format(resultIsRepair ? taskResult.retryVideos : taskResult.rawLinks)}</strong></span>
+                <span><small>{resultIsRepair ? "已恢复" : "新发现"}</small><strong>{nf.format(resultIsRepair ? taskResult.downloadedVideos : taskResult.newVideos)}</strong></span>
                 <span><small>本次入库</small><strong>{nf.format(taskResult.downloadedVideos)}</strong></span>
                 <span><small>{taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
               </div>
-              <p className="task-result-detail">去重后 {nf.format(taskResult.uniqueVideos)} 个视频，跳过 {nf.format(taskResult.skippedVideos)} 个已知编号{taskResult.blockedVideos ? `，安全拦截 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
+              <p className="task-result-detail">{resultIsRepair ? `仅修复现有快照中的 ${nf.format(taskResult.retryVideos)} 个失败项，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.blockedVideos ? `，安全拦截 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
               <div className="task-result-time"><span>完成于 {clock(taskResult.finishedAt ?? null)}</span><span>{taskResult.durationSeconds ? `耗时 ${formatDuration(taskResult.durationSeconds)}` : "耗时未记录"}</span></div>
             </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
             {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}

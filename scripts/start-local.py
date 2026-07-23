@@ -77,6 +77,28 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
     def source_edit_blocked(self) -> bool:
         return type(self).start_pending or lock_is_active(PROJECT / "data" / ".crawling.lock")
 
+    def launch_task(self, command: list[str], log_prefix: str) -> subprocess.Popen | None:
+        log_dir = PROJECT / "data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+        log_path = log_dir / f"{log_prefix}-{stamp}.log"
+        try:
+            with log_path.open("w", encoding="utf-8") as log_file:
+                os.chmod(log_path, 0o600)
+                process = subprocess.Popen(
+                    command,
+                    cwd=PROJECT,
+                    start_new_session=True,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                )
+        except OSError:
+            return None
+        type(self).start_pending = True
+        threading.Thread(target=self.clear_start_pending_when_done, args=(process,), daemon=True).start()
+        SNAPSHOT_WAKEUP.set()
+        return process
+
     def do_POST(self):
         if self.headers.get("Origin") and not self.allowed_origin():
             self.send_json(403, {"error": "拒绝非本地页面发起任务"})
@@ -111,25 +133,28 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                 if not isinstance(configured_sources, list) or not configured_sources:
                     self.send_json(409, {"error": "请先添加至少一个抓取链接", "code": "no_sources"})
                     return
-                log_dir = PROJECT / "data" / "logs"
-                log_dir.mkdir(parents=True, exist_ok=True)
-                stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-                log_path = log_dir / f"api-task-{stamp}.log"
-                try:
-                    with log_path.open("w") as log_file:
-                        proc = subprocess.Popen(
-                            [sys.executable, str(PROJECT / "scripts" / "run-daily-crawl.py"), "--download"],
-                            cwd=PROJECT, start_new_session=True,
-                            stdout=log_file, stderr=subprocess.STDOUT,
-                        )
-                except OSError:
+                proc = self.launch_task(
+                    [sys.executable, str(PROJECT / "scripts" / "run-daily-crawl.py"), "--download"],
+                    "api-crawl",
+                )
+                if proc is None:
                     self.send_json(500, {"error": "无法启动今日任务"})
                     return
-                type(self).start_pending = True
-                threading.Thread(target=self.clear_start_pending_when_done, args=(proc,), daemon=True).start()
-                os.chmod(log_path, 0o600)
-                SNAPSHOT_WAKEUP.set()
             self.send_json(202, {"success": True, "pid": proc.pid})
+        elif request_path == "/api/task/repair":
+            lock_path = PROJECT / "data" / ".crawling.lock"
+            with self.start_guard:
+                if type(self).start_pending or lock_is_active(lock_path):
+                    self.send_json(409, {"error": "任务已在后台运行", "code": "task_running"})
+                    return
+                proc = self.launch_task(
+                    [sys.executable, str(PROJECT / "scripts" / "repair_pending.py")],
+                    "api-repair",
+                )
+                if proc is None:
+                    self.send_json(500, {"error": "无法启动失败项修复"})
+                    return
+            self.send_json(202, {"success": True, "pid": proc.pid, "mode": "repair"})
         elif request_path == "/api/task/control":
             lock_path = PROJECT / "data" / ".crawling.lock"
             if not lock_is_active(lock_path):
