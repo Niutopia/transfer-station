@@ -424,21 +424,6 @@ def _hash_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), path.stat().st_size
 
 
-def _verify_and_result(final: Path, item: dict[str, str], started_at: float, resumed: bool) -> dict[str, object]:
-    digest, total_bytes = _hash_file(final)
-    elapsed = max(0.001, time.monotonic() - started_at)
-    return {
-        "viewkey": item["viewkey"],
-        "status": "downloaded",
-        "path": str(final),
-        "bytes": total_bytes,
-        "sha256": digest.hexdigest(),
-        "duration_s": round(elapsed, 1),
-        "speed_bytes_s": round(total_bytes / elapsed, 1),
-        "resumed": resumed,
-    }
-
-
 def _finalize_verified_partial(
     partial: Path,
     final: Path,

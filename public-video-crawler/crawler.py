@@ -302,6 +302,31 @@ def load_success_keys(path: Path | None) -> set[str]:
         return set()
 
 
+def append_success_keys(path: Path | None, viewkeys: Iterable[str]) -> None:
+    if path is None:
+        return
+    updated = load_success_keys(path)
+    updated.update(viewkey for viewkey in viewkeys if valid_viewkey(viewkey))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text("".join(f"{viewkey}\n" for viewkey in sorted(updated)), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def successful_asset_identifiers(
+    history: dict[str, Video],
+    success_keys: set[str],
+) -> set[str]:
+    assets = {
+        media_asset_identifier(video.thumbnail_url)
+        for viewkey, video in history.items()
+        if viewkey in success_keys
+    }
+    assets.discard("")
+    return assets
+
+
 def load_blocked_media_history(path: Path | None) -> dict[str, dict[str, object]]:
     """Load permanently safety-blocked media keyed by the listing viewkey."""
     if path is None or not path.exists():
@@ -842,6 +867,16 @@ def main(argv: list[str] | None = None) -> int:
         })
     videos = merge_videos(collected)
     success_keys = load_success_keys(args.success_history)
+    success_asset_ids = successful_asset_identifiers(history, success_keys)
+    asset_duplicate_keys = {
+        video.viewkey
+        for video in videos
+        if video.viewkey not in success_keys
+        and media_asset_identifier(video.thumbnail_url) in success_asset_ids
+    }
+    if asset_duplicate_keys:
+        append_success_keys(args.success_history, asset_duplicate_keys)
+        success_keys.update(asset_duplicate_keys)
     blocked_history = load_blocked_media_history(args.blocked_history)
     persisted_block_failures = matching_blocked_failures(videos, blocked_history, success_keys=success_keys)
     persisted_block_keys = {str(item["viewkey"]) for item in persisted_block_failures}
@@ -885,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
         "duplicates_removed": raw_links - len(videos),
         "historical_known_total": len(historical_keys),
         "known_videos_skipped": skipped_count,
+        "asset_duplicates_skipped": len(asset_duplicate_keys),
         "new_videos": new_count,
         "retry_videos": retry_count,
         "listing_failures": listing_failures,

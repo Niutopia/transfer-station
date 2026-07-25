@@ -9,6 +9,7 @@ outputs
 work
 data
 中转站
+history-backups
 **/__pycache__
 **/*.pyc
 public-video-crawler/*.json

@@ -12,6 +12,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - ./data:/app/data
+      - ./history-backups:/app/history-backups
       - ./中转站:/app/中转站
       - ./public:/app/public
       - ./public-video-crawler:/app/public-video-crawler

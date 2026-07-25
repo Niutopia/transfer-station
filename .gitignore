@@ -47,6 +47,7 @@ next-env.d.ts
 /test.html
 /downloads/
 /中转站/
+/history-backups/
 /public/status.json
 # crawl, download, and history data
 /data/*.json

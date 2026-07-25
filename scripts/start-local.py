@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from history_backup import create_backup
 from source_config import SourceConfigError, add_source, load_source_config, remove_source
 from task_lock import lock_is_active, read_lock, update_lock
 
@@ -24,6 +25,14 @@ PROJECT = Path(__file__).resolve().parents[1]
 REFRESH = PROJECT / "scripts" / "refresh-monitor.py"
 SOURCE_CONFIG = PROJECT / "config" / "daily-sources.json"
 SNAPSHOT_WAKEUP = threading.Event()
+
+
+def backup_history() -> None:
+    try:
+        create_backup(PROJECT, PROJECT / "history-backups")
+    except (OSError, ValueError):
+        pass
+
 
 class TaskHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -117,6 +126,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json(400, {"error": str(exc)})
                 return
             SNAPSHOT_WAKEUP.set()
+            backup_history()
             self.send_json(201, {"success": True, "sources": sources})
         elif request_path == "/api/task":
             lock_path = PROJECT / "data" / ".crawling.lock"
@@ -281,6 +291,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(exc)})
             return
         SNAPSHOT_WAKEUP.set()
+        backup_history()
         self.send_json(200, {"success": True, "sources": sources})
 
     def do_OPTIONS(self):
@@ -301,6 +312,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
 
 def watcher(stop: threading.Event) -> None:
     data_dir = PROJECT / "data"
+    backup_history()
     while not stop.is_set():
         subprocess.run([sys.executable, str(REFRESH)], cwd=PROJECT, check=False)
         # Active tasks refresh quickly; terminal progress snapshots stay persistent without causing a busy loop.

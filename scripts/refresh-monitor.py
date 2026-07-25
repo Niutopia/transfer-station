@@ -12,7 +12,7 @@ from pathlib import Path
 
 from download_history import sync_download_history
 from task_lock import lock_is_active, read_lock
-from task_history import latest_run_event, latest_successful_daily_run
+from task_history import event_task_type, latest_run_event, latest_successful_daily_run, latest_task_event
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -40,6 +40,25 @@ def load_json(path: Path, fallback):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return fallback
+
+
+def hours_since(value: object, now: datetime) -> float | None:
+    try:
+        timestamp = datetime.fromisoformat(str(value or ""))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.astimezone()
+        return max(0.0, (now - timestamp.astimezone()).total_seconds() / 3600)
+    except (TypeError, ValueError):
+        return None
+
+
+def snapshots_equal(previous: object, current: object) -> bool:
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return False
+    return (
+        {key: value for key, value in previous.items() if key != "generatedAt"}
+        == {key: value for key, value in current.items() if key != "generatedAt"}
+    )
 
 
 def serialize_download_progress(progress, *, blocked_failures: int = 0, true_failures: int | None = None):
@@ -199,8 +218,13 @@ def main() -> int:
 
     types = Counter(item["extension"].lstrip(".").upper() or "OTHER" for item in files)
     disk = shutil.disk_usage(STAGING)
-    latest_crawl_at = iso_from_timestamp(CRAWL_JSON.stat().st_mtime) if CRAWL_JSON.exists() else None
-    crawl_age_hours = ((now.timestamp() - CRAWL_JSON.stat().st_mtime) / 3600) if CRAWL_JSON.exists() else None
+    snapshot_updated_at = iso_from_timestamp(CRAWL_JSON.stat().st_mtime) if CRAWL_JSON.exists() else None
+    latest_event = latest_run_event(RUN_HISTORY)
+    latest_crawl_event = latest_task_event(RUN_HISTORY, "crawl")
+    latest_repair_event = latest_task_event(RUN_HISTORY, "repair")
+    latest_crawl_at = str((latest_crawl_event or {}).get("timestamp") or snapshot_updated_at or "") or None
+    latest_repair_at = str((latest_repair_event or {}).get("timestamp") or "") or None
+    crawl_age_hours = hours_since(latest_crawl_at, now)
 
     manifest = load_json(DOWNLOAD_MANIFEST, [])
     manifest_failures = []
@@ -333,7 +357,6 @@ def main() -> int:
     has_attention = any(alert.get("level") in {"warning", "error"} for alert in alerts)
     run_status = "active" if is_crawling else ("ready" if unique_videos and handled_download_count == unique_videos and not has_attention else "attention")
     completed_run = latest_successful_daily_run(RUN_HISTORY, today=today)
-    latest_event = latest_run_event(RUN_HISTORY)
     completed_today = bool(
         completed_run
         and not is_crawling
@@ -380,7 +403,7 @@ def main() -> int:
         },
         "storage": {
             "usedBytes": total_bytes,
-            "diskFreeBytes": disk.free,
+            "diskFreeBytes": disk.free // (100 * 1024 * 1024) * (100 * 1024 * 1024),
             "diskTotalBytes": disk.total,
             "diskUsedPercent": round((disk.used / disk.total * 100), 1) if disk.total else 0,
         },
@@ -388,12 +411,18 @@ def main() -> int:
         "types": [{"name": name, "count": count} for name, count in types.most_common()],
         "latestRun": {
             "status": run_status,
-            "startedAt": str(lock_payload.get("startedAt") or latest_crawl_at) if is_crawling else latest_crawl_at,
+            "startedAt": (
+                str(lock_payload.get("startedAt") or latest_crawl_at)
+                if is_crawling
+                else str((latest_event or {}).get("startedAt") or (latest_event or {}).get("timestamp") or latest_crawl_at or "") or None
+            ),
+            "lastCrawlAt": latest_crawl_at,
+            "lastRepairAt": latest_repair_at,
             "taskState": lock_payload.get("state") if lock_payload else None,
             "taskKind": (
                 "repair"
                 if str(lock_payload.get("task") or "").startswith("repair-")
-                else "crawl" if lock_payload else str((latest_event or {}).get("taskType") or "crawl")
+                else "crawl" if lock_payload else event_task_type(latest_event)
             ),
             "taskControllable": bool(lock_payload.get("controllable")) if lock_payload else False,
             "completedToday": completed_today,
@@ -403,7 +432,7 @@ def main() -> int:
                     "success" if latest_event and latest_event.get("crawlExitCode") == 0 and latest_event.get("downloadExitCode") in {0, None}
                     else "failed" if latest_event else "none"
                 ),
-                "taskType": str((latest_event or {}).get("taskType") or "crawl"),
+                "taskType": event_task_type(latest_event),
                 "startedAt": latest_event.get("startedAt") if latest_event else None,
                 "finishedAt": latest_event.get("timestamp") if latest_event else None,
                 "durationSeconds": latest_event.get("durationSeconds") if latest_event else None,
@@ -479,6 +508,9 @@ def main() -> int:
     payload["lastProgress"] = last_progress
     payload["progress"] = current_progress if is_crawling else last_progress
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    previous_payload = load_json(OUTPUT, None)
+    if snapshots_equal(previous_payload, payload):
+        return 0
     temporary = OUTPUT.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, OUTPUT)

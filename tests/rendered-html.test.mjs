@@ -40,6 +40,8 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(Object.hasOwn(status, "currentProgress"), true);
   assert.equal(Object.hasOwn(status, "lastProgress"), true);
   assert.equal(typeof status.latestRun.result, "object");
+  assert.equal(Object.hasOwn(status.latestRun, "lastCrawlAt"), true);
+  assert.equal(Object.hasOwn(status.latestRun, "lastRepairAt"), true);
   assert.equal(status.alerts.some((alert) => alert.title === "历史记录与文件不一致"), false);
   assert.equal(status.latestRun.result.rawLinks >= status.latestRun.result.uniqueVideos, true);
   if (status.lastProgress) {
@@ -105,6 +107,7 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /current-task-panel/);
   assert.doesNotMatch(source, /\{isCrawling && currentProgress && <section className="current-task-panel"/);
   assert.match(source, /等待手动开始任务/);
+  assert.match(source, /最近抓取/);
   assert.match(source, /className="current-task-actions"/);
   assert.match(source, /task-result-card/);
   assert.match(source, /本次任务结果/);

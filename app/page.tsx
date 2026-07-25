@@ -60,6 +60,8 @@ type MonitorData = {
   latestRun: {
     status: "ready" | "attention" | "active";
     startedAt: string | null;
+    lastCrawlAt?: string | null;
+    lastRepairAt?: string | null;
     taskState?: "running" | "paused" | "cancelling" | null;
     taskKind?: "crawl" | "repair" | null;
     taskControllable?: boolean;
@@ -437,7 +439,6 @@ export default function Home() {
     <main className="app-shell">
       <header className="topbar">
         <button className="brand" type="button" aria-label="返回页面顶部" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img className="brand-mark" src="/transfer-station-x.svg?v=1" alt="" aria-hidden="true" />
           <strong className="brand-title">TRANSFER STATION</strong>
         </button>
@@ -501,7 +502,7 @@ export default function Home() {
               <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "任务准备" : !isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
               <span><small>{repairing ? "修复范围" : "抓取范围"}</small><strong>{repairing ? `${data.overview.repairableVideos} 个失败项` : `${data.source.listingCount} 榜 × ${data.source.pagesPerListing} 页`}</strong></span>
               <span><small>处理进度</small><strong>{taskLaunching && !isCrawling ? "正在连接" : isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.repairableVideos > 0 ? `${data.overview.repairableVideos} 个可修复` : "暂无任务"}</strong></span>
-              <span><small>启动时间</small><strong>{taskLaunching && !isCrawling ? "刚刚" : isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : "等待手动启动"}</strong></span>
+              <span><small>{taskAppearsActive ? "启动时间" : "最近抓取"}</small><strong>{taskLaunching && !isCrawling ? "刚刚" : isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : clock(data.latestRun.lastCrawlAt ?? data.latestRun.completedAt ?? data.source.latestCrawlAt ?? null)}</strong></span>
             </div>
             {taskAppearsActive && <div className={`current-task-track ${(taskLaunching || currentProgress?.total === 0) ? "indeterminate" : ""}`} role={isCrawling && (currentProgress?.total ?? 0) > 0 ? "progressbar" : undefined} aria-valuenow={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.done : undefined} aria-valuemin={isCrawling && (currentProgress?.total ?? 0) > 0 ? 0 : undefined} aria-valuemax={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.total : undefined}><i style={isCrawling && (currentProgress?.total ?? 0) > 0 ? { width: `${currentPercent}%` } : undefined} /></div>}
             {isCrawling && currentProgress?.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}

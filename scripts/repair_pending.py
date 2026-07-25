@@ -10,6 +10,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from history_backup import create_backup
 from progress_history import archive_completed_progress
 from task_lock import TaskLock, update_lock
 
@@ -252,6 +253,10 @@ def run_repair(lock_path: Path) -> int:
         "failedVideos": unresolved_count + failed_downloads,
         "downloadedBytes": downloaded_bytes,
     })
+    try:
+        create_backup(PROJECT, PROJECT / "history-backups")
+    except (OSError, ValueError):
+        pass
     return 0 if result_ok else 1
 
 

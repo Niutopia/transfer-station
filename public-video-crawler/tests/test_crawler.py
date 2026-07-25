@@ -20,6 +20,7 @@ import download
 sys.path.append(str(Path(__file__).resolve().parents[2] / "scripts"))
 import task_lock
 import task_history
+import history_backup
 import progress_history
 import source_config
 import download_history
@@ -166,6 +167,61 @@ class CrawlerTests(unittest.TestCase):
             self.assertIsNotNone(event)
             self.assertEqual(event["newVideos"], 2)
 
+    def test_task_history_separates_crawl_and_repair_events(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "run-history.jsonl"
+            history.write_text("\n".join([
+                json.dumps({"timestamp": "2026-07-20T09:00:00+08:00", "downloadRequested": True}),
+                json.dumps({"timestamp": "2026-07-20T10:00:00+08:00", "taskType": "repair"}),
+            ]), encoding="utf-8")
+
+            crawl_event = task_history.latest_task_event(history, "crawl")
+            repair_event = task_history.latest_task_event(history, "repair")
+
+            self.assertEqual(task_history.event_task_type(crawl_event), "crawl")
+            self.assertEqual(crawl_event["timestamp"], "2026-07-20T09:00:00+08:00")
+            self.assertEqual(repair_event["timestamp"], "2026-07-20T10:00:00+08:00")
+
+    def test_history_backup_round_trip_and_avoids_unchanged_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            backup_dir = root / "history-backups"
+            (root / "config").mkdir()
+            (root / "data").mkdir()
+            source = root / "config" / "daily-sources.json"
+            history = root / "data" / "download-success.txt"
+            source.write_text('{"sources":[]}\n', encoding="utf-8")
+            history.write_text("first\n", encoding="utf-8")
+
+            first = history_backup.create_backup(root, backup_dir)
+            self.assertIsNotNone(first)
+            first_archives = sorted(
+                path for path in backup_dir.glob("history-*.zip")
+                if path.name != "history-latest.zip"
+            )
+            history_backup.create_backup(root, backup_dir)
+            self.assertEqual(
+                sorted(
+                    path for path in backup_dir.glob("history-*.zip")
+                    if path.name != "history-latest.zip"
+                ),
+                first_archives,
+            )
+
+            history.write_text("first\nsecond\n", encoding="utf-8")
+            history_backup.create_backup(root, backup_dir)
+            self.assertEqual(
+                len([
+                    path for path in backup_dir.glob("history-*.zip")
+                    if path.name != "history-latest.zip"
+                ]),
+                2,
+            )
+            history.write_text("damaged\n", encoding="utf-8")
+            restored = history_backup.restore_backup(root, backup_dir / "history-latest.zip")
+            self.assertIn(history, restored)
+            self.assertEqual(history.read_text(encoding="utf-8"), "first\nsecond\n")
+
     def test_parser_deduplicates_and_prefers_visible_card(self) -> None:
         videos = crawler.parse_listing(FIXTURE, crawler.DEFAULT_URL, 1)
         by_key = {video.viewkey: video for video in videos}
@@ -247,6 +303,33 @@ class CrawlerTests(unittest.TestCase):
         crawler.select_for_processing(current, history, set(), {"abc12345"})
         self.assertEqual(current[0].media_url, "https://media.example.test/known.mp4")
         self.assertEqual(current[0].resolved_at, "2026-07-20T12:00:00+08:00")
+
+    def test_successful_asset_identity_catches_a_changed_viewkey(self) -> None:
+        history = {
+            "original": crawler.Video(
+                viewkey="original",
+                canonical_url="https://91porn.com/view_video.php?viewkey=original",
+                thumbnail_url="https://cdn.example.test/thumb/1227001.jpg",
+            )
+        }
+        assets = crawler.successful_asset_identifiers(history, {"original"})
+        self.assertEqual(assets, {"1227001"})
+        current = crawler.Video(
+            viewkey="replacement",
+            canonical_url="https://91porn.com/view_video.php?viewkey=replacement",
+            thumbnail_url="https://cdn.example.test/thumb/1227001.jpg",
+        )
+        self.assertIn(crawler.media_asset_identifier(current.thumbnail_url), assets)
+
+    def test_asset_duplicate_viewkey_can_be_persisted_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "download-success.txt"
+            path.write_text("original\n", encoding="utf-8")
+            crawler.append_success_keys(path, {"replacement"})
+            self.assertEqual(
+                crawler.load_success_keys(path),
+                {"original", "replacement"},
+            )
 
     def test_repair_candidates_exclude_completed_and_safety_blocked_items(self) -> None:
         snapshot = {

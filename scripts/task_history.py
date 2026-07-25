@@ -24,6 +24,38 @@ def latest_run_event(path: Path) -> dict[str, object] | None:
     return None
 
 
+def event_task_type(event: object) -> str:
+    """Normalize old history rows that predate the explicit taskType field."""
+    if not isinstance(event, dict):
+        return "crawl"
+    explicit = str(event.get("taskType") or "")
+    if explicit in {"crawl", "repair"}:
+        return explicit
+    return "crawl"
+
+
+def latest_task_event(path: Path, task_type: str) -> dict[str, object] | None:
+    """Return the newest valid history row for one task type."""
+    if task_type not in {"crawl", "repair"}:
+        raise ValueError("task_type must be crawl or repair")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("timestamp")
+            and event_task_type(event) == task_type
+        ):
+            return event
+    return None
+
+
 def latest_successful_daily_run(path: Path, *, today: date | None = None) -> dict[str, object] | None:
     target_day = today or datetime.now().astimezone().date()
     try:

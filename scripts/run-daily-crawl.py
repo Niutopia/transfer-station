@@ -12,6 +12,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from history_backup import create_backup
 from progress_history import archive_completed_progress
 from task_lock import TaskLock, update_lock
 
@@ -176,6 +177,8 @@ def main() -> int:
         "timestamp": task_finished_at.isoformat(timespec="seconds"),
         "startedAt": task_started_at.isoformat(timespec="seconds"),
         "durationSeconds": round((task_finished_at - task_started_at).total_seconds(), 1),
+        "taskType": "crawl",
+        "resultStatus": "success" if crawl_code == 0 and download_code in {0, None} else "failed",
         "crawlExitCode": crawl_code,
         "downloadExitCode": download_code,
         "downloadRequested": args.download,
@@ -194,6 +197,10 @@ def main() -> int:
     }
     with RUN_HISTORY.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+    try:
+        create_backup(PROJECT, PROJECT / "history-backups")
+    except (OSError, ValueError):
+        pass
 
     subprocess.run([sys.executable, str(REFRESH_MONITOR)], cwd=PROJECT, check=False)
     if crawl_code != 0:
