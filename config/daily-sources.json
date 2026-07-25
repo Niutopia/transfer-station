@@ -2,6 +2,14 @@
   "pagesPerSource": 2,
   "sources": [
     {
+      "name": "首页",
+      "url": "https://91porn.com/index.php"
+    },
+    {
+      "name": "ori",
+      "url": "https://91porn.com/v.php?category=ori&viewtype=basic"
+    },
+    {
       "name": "hot",
       "url": "https://91porn.com/v.php?category=hot&viewtype=basic"
     },
@@ -14,8 +22,16 @@
       "url": "https://91porn.com/v.php?category=tf&viewtype=basic"
     },
     {
-      "name": "top · m=-1",
+      "name": "rf",
+      "url": "https://91porn.com/v.php?category=rf&viewtype=basic"
+    },
+    {
+      "name": "top",
       "url": "https://91porn.com/v.php?category=top&m=-1&viewtype=basic"
+    },
+    {
+      "name": "md",
+      "url": "https://91porn.com/v.php?category=md&viewtype=basic"
     },
     {
       "name": "mf",

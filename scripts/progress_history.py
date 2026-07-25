@@ -8,12 +8,16 @@ from pathlib import Path
 
 
 def archive_completed_progress(source: Path, destination: Path) -> bool:
-    """Copy a completed progress snapshot atomically, returning whether it was saved."""
+    """Copy the most recent terminal progress snapshot atomically."""
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
-    if not isinstance(payload, dict) or payload.get("stage") != "complete" or int(payload.get("total") or 0) <= 0:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("stage") not in {"complete", "failed", "cancelled"}
+        or int(payload.get("total") or 0) <= 0
+    ):
         return False
 
     try:

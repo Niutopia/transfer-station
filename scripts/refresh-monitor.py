@@ -42,18 +42,24 @@ def load_json(path: Path, fallback):
         return fallback
 
 
-def serialize_download_progress(progress):
+def serialize_download_progress(progress, *, blocked_failures: int = 0, true_failures: int | None = None):
     if not isinstance(progress, dict):
         return None
+    stage = str(progress.get("stage") or "downloading")
+    failed = int(progress.get("failed", 0))
+    if stage == "failed" and failed and true_failures == 0 and failed <= blocked_failures:
+        stage = "complete"
+        failed = 0
     return {
-        "stage": progress.get("stage", "downloading"),
+        "stage": stage,
         "done": int(progress.get("done", 0)),
         "total": int(progress.get("total", 0)),
         "active": progress.get("active", []),
         "bytesDone": int(progress.get("bytesDone", 0)),
         "bytesTotalKnown": int(progress.get("bytesTotalKnown", 0)),
         "knownItems": int(progress.get("knownItems", 0)),
-        "failed": int(progress.get("failed", 0)),
+        "failed": failed,
+        "blocked": blocked_failures,
         "speedBytesS": float(progress.get("speedBytesS", 0)),
         "etaSeconds": progress.get("etaSeconds"),
         "startedAt": progress.get("startedAt"),
@@ -198,8 +204,33 @@ def main() -> int:
 
     manifest = load_json(DOWNLOAD_MANIFEST, [])
     manifest_failures = []
+    manifest_blocked_keys: set[str] = set()
     if isinstance(manifest, list):
-        manifest_failures = [item for item in manifest if isinstance(item, dict) and item.get("status") == "failed"]
+        manifest_blocked_keys = {
+            str(item.get("viewkey") or "")
+            for item in manifest
+            if isinstance(item, dict)
+            and (
+                item.get("status") == "blocked"
+                or (
+                    item.get("status") == "failed"
+                    and "详情页媒体与榜单不一致" in str(item.get("error") or "")
+                )
+            )
+        }
+        manifest_blocked_keys.discard("")
+        manifest_failures = [
+            item
+            for item in manifest
+            if isinstance(item, dict)
+            and item.get("status") == "failed"
+            and str(item.get("viewkey") or "") not in manifest_blocked_keys
+        ]
+    blocked_keys.update(listed_keys & manifest_blocked_keys)
+    unresolved_keys = listed_keys - resolved_keys
+    blocked_keys &= unresolved_keys
+    unresolved_error_keys = unresolved_keys - blocked_keys
+    blocked_count = len(blocked_keys)
 
     alerts = []
     if not CRAWL_JSON.exists():
@@ -415,7 +446,11 @@ def main() -> int:
                 "mode": "repair" if str(lock_payload.get("task") or "").startswith("repair-") else "crawl",
             }
         elif isinstance(download_progress, dict) and download_progress.get("stage") not in {"complete", "failed", "cancelled"}:
-            current_progress = serialize_download_progress(download_progress)
+            current_progress = serialize_download_progress(
+                download_progress,
+                blocked_failures=len(manifest_blocked_keys),
+                true_failures=len(manifest_failures),
+            )
             current_progress["mode"] = "repair" if str(lock_payload.get("task") or "").startswith("repair-") else "crawl"
         else:
             current_progress = {
@@ -427,13 +462,18 @@ def main() -> int:
             }
 
     last_progress_payload = None
-    if isinstance(download_progress, dict) and download_progress.get("stage") == "complete" and int(download_progress.get("total") or 0) > 0:
+    terminal_progress_stages = {"complete", "failed", "cancelled"}
+    if isinstance(download_progress, dict) and download_progress.get("stage") in terminal_progress_stages and int(download_progress.get("total") or 0) > 0:
         last_progress_payload = download_progress
     else:
         archived_progress = load_json(LAST_COMPLETED_PROGRESS, None)
-        if isinstance(archived_progress, dict) and archived_progress.get("stage") == "complete":
+        if isinstance(archived_progress, dict) and archived_progress.get("stage") in terminal_progress_stages:
             last_progress_payload = archived_progress
-    last_progress = serialize_download_progress(last_progress_payload)
+    last_progress = serialize_download_progress(
+        last_progress_payload,
+        blocked_failures=len(manifest_blocked_keys),
+        true_failures=len(manifest_failures),
+    )
 
     payload["currentProgress"] = current_progress
     payload["lastProgress"] = last_progress

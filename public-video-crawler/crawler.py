@@ -302,6 +302,91 @@ def load_success_keys(path: Path | None) -> set[str]:
         return set()
 
 
+def load_blocked_media_history(path: Path | None) -> dict[str, dict[str, object]]:
+    """Load permanently safety-blocked media keyed by the listing viewkey."""
+    if path is None or not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, dict):
+        return {}
+    return {
+        str(viewkey): dict(value)
+        for viewkey, value in items.items()
+        if valid_viewkey(str(viewkey)) and isinstance(value, dict)
+    }
+
+
+def matching_blocked_failures(
+    videos: Iterable[Video],
+    history: dict[str, dict[str, object]],
+    *,
+    success_keys: set[str] | None = None,
+) -> list[dict[str, object]]:
+    """Return persisted blocks that still match the listing asset identity."""
+    failures: list[dict[str, object]] = []
+    completed = success_keys or set()
+    for video in videos:
+        if video.viewkey in completed:
+            continue
+        record = history.get(video.viewkey)
+        if not record:
+            continue
+        recorded_asset = str(record.get("expectedAsset") or "")
+        current_asset = media_asset_identifier(video.thumbnail_url)
+        if recorded_asset and current_asset and recorded_asset != current_asset:
+            continue
+        failures.append({
+            "viewkey": video.viewkey,
+            "error": str(record.get("error") or "播放器资源与榜单不一致"),
+            "kind": "media_mismatch",
+            "persistent": True,
+        })
+    return failures
+
+
+def update_blocked_media_history(
+    path: Path | None,
+    videos: Iterable[Video],
+    failures: Iterable[dict[str, object]],
+) -> None:
+    """Persist confirmed identity mismatches so later crawls do not retry them."""
+    if path is None:
+        return
+    items = load_blocked_media_history(path)
+    videos_by_key = {video.viewkey: video for video in videos}
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    changed = False
+    for failure in failures:
+        if str(failure.get("kind") or "") != "media_mismatch":
+            continue
+        viewkey = str(failure.get("viewkey") or "")
+        video = videos_by_key.get(viewkey)
+        if video is None or not valid_viewkey(viewkey):
+            continue
+        previous = items.get(viewkey, {})
+        items[viewkey] = {
+            "expectedAsset": media_asset_identifier(video.thumbnail_url),
+            "error": str(failure.get("error") or "播放器资源与榜单不一致"),
+            "firstSeenAt": str(previous.get("firstSeenAt") or now),
+            "lastSeenAt": now,
+        }
+        changed = True
+    if not changed:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"version": 1, "items": items}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
 def select_for_processing(
     videos: list[Video],
     history: dict[str, Video],
@@ -669,6 +754,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--progress", type=Path, help="进度文件路径；解析时写入 done/total JSON")
     parser.add_argument("--history", type=Path, help="跨日历史索引；已见且已下载的视频不再访问详情页")
     parser.add_argument("--success-history", type=Path, help="成功下载的历史名单，用于跳过用户已删文件")
+    parser.add_argument("--blocked-history", type=Path, help="已确认错误媒体索引；身份未变化时不再访问详情页")
     parser.add_argument("--existing-dir", type=Path, help="已下载视频目录；历史中缺失文件的条目会重新解析")
     parser.add_argument("--new-json", type=Path, help="只输出本次新增或需重试条目的 JSON")
     parser.add_argument("--new-csv", type=Path, help="只输出本次新增或需重试条目的 CSV")
@@ -756,17 +842,24 @@ def main(argv: list[str] | None = None) -> int:
         })
     videos = merge_videos(collected)
     success_keys = load_success_keys(args.success_history)
+    blocked_history = load_blocked_media_history(args.blocked_history)
+    persisted_block_failures = matching_blocked_failures(videos, blocked_history, success_keys=success_keys)
+    persisted_block_keys = {str(item["viewkey"]) for item in persisted_block_failures}
+    for video in videos:
+        if video.viewkey in persisted_block_keys:
+            video.media_url = ""
+            video.resolved_at = ""
     processing, new_count, retry_count, skipped_count = select_for_processing(
-        videos,
+        [video for video in videos if video.viewkey not in persisted_block_keys],
         history,
         existing_viewkeys(args.existing_dir),
         success_keys,
     )
-    resolve_failures: list[dict[str, str]] = []
+    resolve_failures: list[dict[str, object]] = list(persisted_block_failures)
     if args.resolve_media:
         if args.progress:
             set_progress_target(args.progress, len(processing))
-        resolve_failures = resolve_media(
+        new_resolve_failures = resolve_media(
             opener,
             processing,
             timeout=args.timeout,
@@ -777,6 +870,8 @@ def main(argv: list[str] | None = None) -> int:
             rate_limiter=request_limiter,
             continue_on_error=True,
         )
+        resolve_failures.extend(new_resolve_failures)
+        update_blocked_media_history(args.blocked_history, processing, new_resolve_failures)
         if args.progress and args.progress.exists():
             args.progress.unlink(missing_ok=True)
     metadata = {
@@ -794,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
         "retry_videos": retry_count,
         "listing_failures": listing_failures,
         "resolve_failures": resolve_failures,
+        "persisted_blocked_skipped": len(persisted_block_failures),
         "detail_pages_requested": len(processing) if args.resolve_media else 0,
         "authenticated": False,
         "media_resolved": bool(args.resolve_media),

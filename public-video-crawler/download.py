@@ -63,6 +63,10 @@ class TransientDownloadError(DownloadError):
         self.retry_after = retry_after
 
 
+def is_media_mismatch_error(exc: BaseException) -> bool:
+    return "详情页媒体与榜单不一致" in str(exc)
+
+
 class RateLimiter:
     def __init__(self, interval: float) -> None:
         self.interval = max(0.0, interval)
@@ -681,7 +685,7 @@ def refresh_media(item: dict[str, str], timeout: float, retries: int, progress_c
     item["resolved_at"] = video.resolved_at or _iso_now()
 
 
-def update_media_cache(path: Path | None, items: list[dict[str, str]]) -> None:
+def update_media_cache(path: Path | None, items: list[dict[str, str]], blocked_keys: set[str] | None = None) -> None:
     if path is None or not path.exists():
         return
     try:
@@ -692,9 +696,16 @@ def update_media_cache(path: Path | None, items: list[dict[str, str]]) -> None:
     if not isinstance(videos, list):
         return
     refreshed = {item["viewkey"]: item for item in items if item.get("resolved_at")}
+    blocked = blocked_keys or set()
     for video in videos:
-        if isinstance(video, dict) and str(video.get("viewkey") or "") in refreshed:
-            source = refreshed[str(video["viewkey"])]
+        if not isinstance(video, dict):
+            continue
+        viewkey = str(video.get("viewkey") or "")
+        if viewkey in blocked:
+            video["media_url"] = ""
+            video["resolved_at"] = ""
+        elif viewkey in refreshed:
+            source = refreshed[viewkey]
             video["media_url"] = source["media_url"]
             video["resolved_at"] = source["resolved_at"]
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -711,6 +722,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--success-history", type=Path)
     parser.add_argument("--content-history", type=Path, help="已成功内容的 SHA-256 索引，用于拦截换编号的重复视频")
     parser.add_argument("--media-cache", type=Path, help="持久化刷新后的媒体链接")
+    parser.add_argument("--blocked-history", type=Path, help="持久化已确认的错误媒体身份")
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--delay", type=float, default=0.5, help="新请求启动的最小间隔")
@@ -764,7 +776,15 @@ def main(argv: list[str] | None = None) -> int:
                 refresh_media(item, args.timeout, args.retries, _update_dl_item)
                 result = download_one(build_download_opener(), item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter, content_history=content_history)
         except Exception as exc:
-            result = {"viewkey": item.get("viewkey"), "status": "failed", "error": str(exc)}
+            mismatch = is_media_mismatch_error(exc)
+            result = {
+                "viewkey": item.get("viewkey"),
+                "status": "blocked" if mismatch else "failed",
+                "error": str(exc),
+            }
+            if mismatch:
+                item["media_url"] = ""
+                item["resolved_at"] = ""
             print(f"[{item.get('viewkey')}] error: {exc}", file=sys.stderr)
         _write_dl_progress(item["viewkey"], result)
         with results_lock:
@@ -778,12 +798,40 @@ def main(argv: list[str] | None = None) -> int:
 
     results = [results_by_key[item["viewkey"]] for item in items]
     failed = any(result.get("status") == "failed" for result in results)
+    blocked_keys = {
+        str(result.get("viewkey") or "")
+        for result in results
+        if result.get("status") == "blocked"
+    }
+    blocked_keys.discard("")
     finish_dl_progress(failed)
     temporary = manifest.with_suffix(manifest.suffix + ".tmp")
     temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.chmod(temporary, 0o600)
     os.replace(temporary, manifest)
-    update_media_cache(args.media_cache, items)
+    update_media_cache(args.media_cache, items, blocked_keys)
+    if blocked_keys and args.blocked_history:
+        import crawler
+
+        videos = [
+            crawler.Video(
+                viewkey=item["viewkey"],
+                canonical_url=item.get("canonical_url", ""),
+                thumbnail_url=item.get("thumbnail_url", ""),
+            )
+            for item in items
+            if item["viewkey"] in blocked_keys
+        ]
+        failures = [
+            {
+                "viewkey": str(result.get("viewkey") or ""),
+                "kind": "media_mismatch",
+                "error": str(result.get("error") or ""),
+            }
+            for result in results
+            if result.get("status") == "blocked"
+        ]
+        crawler.update_blocked_media_history(args.blocked_history, videos, failures)
 
     if args.success_history:
         existing = set()

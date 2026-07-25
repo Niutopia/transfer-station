@@ -58,6 +58,7 @@ def main() -> int:
         "--listing-concurrency", "3", "--resolve-concurrency", "6", "--retries", "4",
         "--resolve-media", "--history", str(DATA / "video-history.json"),
         "--success-history", str(DATA / "download-success.txt"),
+        "--blocked-history", str(DATA / "blocked-media.json"),
         "--new-json", str(DATA / "pending-videos.json"), "--new-csv", str(DATA / "pending-videos.csv"),
         "--json", "videos-with-media.json", "--csv", "videos-with-media.csv",
     ]
@@ -99,6 +100,7 @@ def main() -> int:
                     "--success-history", str(DATA / "download-success.txt"),
                     "--content-history", str(DATA / "download-content-history.json"),
                     "--media-cache", str(DATA / "video-history.json"),
+                    "--blocked-history", str(DATA / "blocked-media.json"),
                     "--delay", str(args.delay),
                     "--concurrency", "4",
                     "--retries", "5",
@@ -153,15 +155,22 @@ def main() -> int:
     resolve_failures = pending_metadata.get("resolve_failures") if isinstance(pending_metadata, dict) else []
     if not isinstance(resolve_failures, list):
         resolve_failures = []
-    blocked_videos = sum(
-        1
+    blocked_keys = {
+        str(item.get("viewkey") or "")
         for item in resolve_failures
         if isinstance(item, dict)
         and (
             item.get("kind") == "media_mismatch"
             or "详情页媒体与榜单不一致" in str(item.get("error") or "")
         )
+    }
+    blocked_keys.update(
+        str(item.get("viewkey") or "")
+        for item in manifest_results
+        if isinstance(item, dict) and item.get("status") == "blocked"
     )
+    blocked_keys.discard("")
+    blocked_videos = len(blocked_keys)
     downloaded_bytes = sum(int(item.get("bytes") or 0) for item in manifest_results if isinstance(item, dict) and item.get("status") == "downloaded")
     event = {
         "timestamp": task_finished_at.isoformat(timespec="seconds"),

@@ -71,6 +71,25 @@ def is_mismatch_failure(item: object) -> bool:
     )
 
 
+def summarize_repair_failures(
+    failures: list[dict[str, str]],
+    manifest_rows: list[object],
+) -> tuple[int, int]:
+    resolver_mismatch_keys = {
+        str(item.get("viewkey") or "")
+        for item in failures
+        if is_mismatch_failure(item)
+    }
+    download_blocked_keys = {
+        str(row.get("viewkey") or "")
+        for row in manifest_rows
+        if isinstance(row, dict) and row.get("status") == "blocked"
+    }
+    mismatch_keys = (resolver_mismatch_keys | download_blocked_keys) - {""}
+    unresolved_count = sum(1 for item in failures if not is_mismatch_failure(item))
+    return len(mismatch_keys), unresolved_count
+
+
 def collect_repair_candidates(
     snapshot: object,
     completed_keys: set[str],
@@ -174,6 +193,7 @@ def run_repair(lock_path: Path) -> int:
             rate_limiter=crawler.RateLimiter(0.5),
             continue_on_error=True,
         )
+        crawler.update_blocked_media_history(DATA / "blocked-media.json", attempted, failures)
     (DATA / "crawl-progress.json").unlink(missing_ok=True)
     update_snapshot(snapshot, attempted, failures)
 
@@ -196,6 +216,7 @@ def run_repair(lock_path: Path) -> int:
             "--success-history", str(DATA / "download-success.txt"),
             "--content-history", str(DATA / "download-content-history.json"),
             "--media-cache", str(DATA / "video-history.json"),
+            "--blocked-history", str(DATA / "blocked-media.json"),
             "--progress", str(DATA / "download-progress.json"),
             "--concurrency", "4", "--retries", "5", "--link-max-age", "180", "--delay", "0.5",
         ], DATA / "logs" / f"repair-download-{stamp}.log")
@@ -204,8 +225,7 @@ def run_repair(lock_path: Path) -> int:
 
     manifest = load_json(REPAIR_MANIFEST, [])
     rows = manifest if isinstance(manifest, list) else []
-    mismatch_count = sum(1 for item in failures if is_mismatch_failure(item))
-    unresolved_count = len(failures) - mismatch_count
+    mismatch_count, unresolved_count = summarize_repair_failures(failures, rows)
     failed_downloads = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
     downloaded = sum(1 for row in rows if isinstance(row, dict) and row.get("status") in {"downloaded", "skipped"})
     duplicates = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "duplicate")

@@ -267,6 +267,13 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual([item["viewkey"] for item in candidates], ["retry"])
         self.assertEqual(blocked, {"blocked"})
 
+    def test_download_time_block_does_not_make_unresolved_count_negative(self) -> None:
+        blocked, unresolved = repair_pending.summarize_repair_failures(
+            [],
+            [{"viewkey": "blocked-at-download", "status": "blocked"}],
+        )
+        self.assertEqual((blocked, unresolved), (1, 0))
+
     def test_page_url_preserves_filters_and_replaces_page(self) -> None:
         url = crawler.page_url(
             "https://91porn.com/v.php?category=hot&viewtype=basic&page=9", 2
@@ -540,6 +547,47 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(failures[0]["kind"], "media_mismatch")
         self.assertEqual(videos[0].media_url, "")
         self.assertEqual(videos[0].resolved_at, "")
+        self.assertTrue(download.is_media_mismatch_error(crawler.MediaMismatchError(failures[0]["error"])))
+
+    def test_persisted_media_mismatch_skips_only_the_same_listing_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history_path = Path(directory) / "blocked-media.json"
+            original = crawler.Video(
+                viewkey="abc12345",
+                canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+                thumbnail_url="https://cdn.example.test/thumb/1226511.jpg",
+            )
+            crawler.update_blocked_media_history(history_path, [original], [{
+                "viewkey": "abc12345",
+                "kind": "media_mismatch",
+                "error": "详情页媒体与榜单不一致",
+            }])
+            history = crawler.load_blocked_media_history(history_path)
+
+            matching = crawler.matching_blocked_failures([original], history)
+            changed = crawler.Video(
+                viewkey="abc12345",
+                canonical_url=original.canonical_url,
+                thumbnail_url="https://cdn.example.test/thumb/1227000.jpg",
+            )
+
+            self.assertEqual([item["viewkey"] for item in matching], ["abc12345"])
+            self.assertEqual(crawler.matching_blocked_failures([changed], history), [])
+
+    def test_terminal_failed_progress_is_archived_for_truthful_last_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "download-progress.json"
+            destination = root / "last-progress.json"
+            source.write_text(json.dumps({
+                "stage": "failed",
+                "done": 16,
+                "total": 16,
+                "failed": 3,
+            }), encoding="utf-8")
+
+            self.assertTrue(progress_history.archive_completed_progress(source, destination))
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8"))["stage"], "failed")
 
     def test_resume_restarts_when_content_range_does_not_match(self) -> None:
         item = {

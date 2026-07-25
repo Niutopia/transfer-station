@@ -18,6 +18,7 @@ type ProgressData = {
   bytesTotalKnown?: number;
   knownItems?: number;
   failed?: number;
+  blocked?: number;
   speedBytesS?: number;
   etaSeconds?: number | null;
   startedAt?: string | null;
@@ -425,6 +426,13 @@ export default function Home() {
   const repairing = taskAppearsActive && (data.latestRun.taskKind === "repair" || currentProgress?.mode === "repair");
   const taskResult = data.latestRun.result;
   const resultIsRepair = taskResult?.taskType === "repair";
+  const resultIsBlockedReview = Boolean(
+    resultIsRepair
+    && taskResult
+    && taskResult.blockedVideos > 0
+    && taskResult.downloadedVideos === 0
+    && taskResult.failedVideos === 0
+  );
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -580,7 +588,7 @@ export default function Home() {
               <h2 id="task-result-title">本次任务结果</h2>
               <span className={`status ${taskAppearsActive ? "active" : taskResult?.status === "failed" ? "attention" : "done"}`}>{taskAppearsActive ? "进行中" : taskResult?.status === "failed" ? "失败" : taskResult?.status === "success" ? "已完成" : "暂无"}</span>
             </div>
-            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? resultIsRepair ? "失败项修复完成" : taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "failed" ? resultIsRepair ? "部分失败项仍需处理" : "任务未能完整完成" : "尚未运行任务"}</strong>
+            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? resultIsBlockedReview ? "错误媒体复核完成" : resultIsRepair ? "可恢复失败项处理完成" : taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "failed" ? resultIsRepair ? "部分可恢复失败项仍需处理" : "任务未能完整完成" : "尚未运行任务"}</strong>
             {taskAppearsActive ? <div className="task-result-grid">
               <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "准备中" : currentProgress?.stage === "downloading" ? "下载入库" : currentProgress?.stage === "resolving" ? "媒体解析" : repairing ? "修复准备" : "榜单抓取"}</strong></span>
               <span><small>处理进度</small><strong>{currentProgress?.total ? `${currentProgress.done}/${currentProgress.total}` : "计算中"}</strong></span>
@@ -588,12 +596,12 @@ export default function Home() {
               <span><small>实时速度</small><strong>{formatBytes(currentProgress?.speedBytesS ?? aggregateSpeed)}/s</strong></span>
             </div> : taskResult && taskResult.status !== "none" ? <>
               <div className="task-result-grid">
-                <span><small>{resultIsRepair ? "待修复" : "检查链接"}</small><strong>{nf.format(resultIsRepair ? taskResult.retryVideos : taskResult.rawLinks)}</strong></span>
+                <span><small>{resultIsRepair ? "复核项目" : "检查链接"}</small><strong>{nf.format(resultIsRepair ? taskResult.retryVideos : taskResult.rawLinks)}</strong></span>
                 <span><small>{resultIsRepair ? "已恢复" : "新发现"}</small><strong>{nf.format(resultIsRepair ? taskResult.downloadedVideos : taskResult.newVideos)}</strong></span>
                 <span><small>本次入库</small><strong>{nf.format(taskResult.downloadedVideos)}</strong></span>
                 <span><small>{taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
               </div>
-              <p className="task-result-detail">{resultIsRepair ? `仅修复现有快照中的 ${nf.format(taskResult.retryVideos)} 个失败项，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.blockedVideos ? `，安全拦截 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
+              <p className="task-result-detail">{resultIsRepair ? `仅复核现有快照中的 ${nf.format(taskResult.retryVideos)} 个可恢复项目，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.blockedVideos ? `，确认并永久跳过 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
               <div className="task-result-time"><span>完成于 {clock(taskResult.finishedAt ?? null)}</span><span>{taskResult.durationSeconds ? `耗时 ${formatDuration(taskResult.durationSeconds)}` : "耗时未记录"}</span></div>
             </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
             {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}
