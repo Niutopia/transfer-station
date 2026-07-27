@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-DOWNLOAD_LOG_PATTERN = re.compile(r"^download-(\d{8})-(\d{6})\.log$")
+DOWNLOAD_LOG_PATTERN = re.compile(r"^(?:repair-)?download-(\d{8})-(\d{6})\.log$")
 
 
 def _load_items(path: Path) -> dict[str, dict[str, object]]:
@@ -44,7 +44,7 @@ def sync_download_history(index_path: Path, log_dir: Path) -> list[dict[str, obj
     items = _load_items(index_path)
     changed = not index_path.exists()
     try:
-        log_paths = sorted(log_dir.glob("download-*.log"))
+        log_paths = sorted(log_dir.glob("*download-*.log"))
     except OSError:
         log_paths = []
 

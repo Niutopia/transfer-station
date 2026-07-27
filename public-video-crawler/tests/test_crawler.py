@@ -104,6 +104,24 @@ class CrawlerTests(unittest.TestCase):
             persisted = download_history.sync_download_history(index, logs)
             self.assertEqual({item["viewkey"] for item in persisted}, {"first", "second"})
 
+    def test_download_history_includes_repair_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / "logs"
+            logs.mkdir()
+            (logs / "repair-download-20260721-140000.log").write_text(
+                json.dumps({"viewkey": "repaired", "status": "downloaded", "bytes": 321}) + "\n",
+                encoding="utf-8",
+            )
+
+            items = download_history.sync_download_history(root / "download-history.json", logs)
+
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["viewkey"], "repaired")
+            self.assertEqual(items[0]["date"], "2026-07-21")
+            self.assertEqual(items[0]["bytes"], 321)
+            self.assertTrue(str(items[0]["downloadedAt"]).startswith("2026-07-21T14:00:00"))
+
     def test_source_config_adds_and_removes_validated_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "daily-sources.json"
@@ -146,6 +164,13 @@ class CrawlerTests(unittest.TestCase):
             sources = source_config.add_source(path, "", "https://91porn.com/v.php?next=watch")
             self.assertEqual(sources[-1], {"name": "watch", "url": "https://91porn.com/v.php?next=watch"})
 
+    def test_source_config_rejects_out_of_range_page_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "daily-sources.json"
+            path.write_text(json.dumps({"pagesPerSource": 21, "sources": []}), encoding="utf-8")
+            with self.assertRaises(source_config.SourceConfigError):
+                source_config.load_source_config(path)
+
     def test_completed_progress_is_archived_atomically(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -181,6 +206,14 @@ class CrawlerTests(unittest.TestCase):
             self.assertEqual(task_history.event_task_type(crawl_event), "crawl")
             self.assertEqual(crawl_event["timestamp"], "2026-07-20T09:00:00+08:00")
             self.assertEqual(repair_event["timestamp"], "2026-07-20T10:00:00+08:00")
+
+    def test_partial_listing_failure_is_an_attention_result(self) -> None:
+        event = {
+            "crawlExitCode": 0,
+            "downloadExitCode": 0,
+            "listingFailures": 1,
+        }
+        self.assertEqual(task_history.event_result_status(event), "attention")
 
     def test_history_backup_round_trip_and_avoids_unchanged_archives(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -395,6 +428,12 @@ class CrawlerTests(unittest.TestCase):
             "https://media.example.test/video.mp4?st=opaque&f=opaque",
         )
 
+    def test_pending_metadata_preserves_full_crawl_total(self) -> None:
+        metadata = {"raw_detail_links": 735, "unique_videos": 275}
+        pending = crawler.pending_output_metadata(metadata, 5)
+        self.assertEqual(pending["unique_videos"], 275)
+        self.assertEqual(pending["processing_videos"], 5)
+
     def test_percent_encoded_strencode2_source_is_extracted(self) -> None:
         encoded = (
             "%3Csource%20src%3D%27https%3A%2F%2Fmedia.example.test%2F"
@@ -453,6 +492,20 @@ class CrawlerTests(unittest.TestCase):
     def test_private_network_media_urls_are_rejected(self) -> None:
         body = "https://127.0.0.1/private.mp4 https://192.168.1.2/private.mp4"
         self.assertEqual(crawler.extract_media_urls(body), [])
+
+    def test_resolved_private_media_endpoint_is_rejected(self) -> None:
+        resolved = [(2, 1, 6, "", ("127.0.0.1", 443))]
+        with mock.patch.object(download.socket, "getaddrinfo", return_value=resolved):
+            with self.assertRaisesRegex(download.DownloadError, "非公网"):
+                download.ensure_public_endpoint("https://media.example.test/video.mp4")
+
+    def test_resolved_global_media_endpoint_is_accepted(self) -> None:
+        resolved = [(2, 1, 6, "", ("8.8.8.8", 443))]
+        with mock.patch.object(download.socket, "getaddrinfo", return_value=resolved):
+            self.assertEqual(
+                download.ensure_public_endpoint("https://media.example.test/video.mp4"),
+                "https://media.example.test/video.mp4",
+            )
 
     def test_download_manifest_loader_deduplicates_key_and_url(self) -> None:
         payload = {"videos": [
@@ -548,15 +601,16 @@ class CrawlerTests(unittest.TestCase):
             response = FakeResponse(b"same-content", headers={"Content-Type": "video/mp4", "Content-Length": "12"})
             opener = mock.Mock()
             opener.open.return_value = response
-            result = download.download_one(
-                opener,
-                item,
-                output,
-                partials,
-                timeout=1,
-                max_bytes=1024 * 1024,
-                content_history=history,
-            )
+            with mock.patch.object(download, "ensure_public_endpoint", return_value=item["media_url"]):
+                result = download.download_one(
+                    opener,
+                    item,
+                    output,
+                    partials,
+                    timeout=1,
+                    max_bytes=1024 * 1024,
+                    content_history=history,
+                )
             self.assertEqual(result["status"], "duplicate")
             self.assertEqual(result["duplicate_of"], "abc12345")
             self.assertFalse((output / "xyz98765.mp4").exists())
@@ -696,7 +750,8 @@ class CrawlerTests(unittest.TestCase):
             replacement = FakeResponse(b"new!", headers={"Content-Type": "video/mp4", "Content-Length": "4"})
             opener = mock.Mock()
             opener.open.side_effect = [mismatched, replacement]
-            result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024, retries=1)
+            with mock.patch.object(download, "ensure_public_endpoint", return_value=item["media_url"]):
+                result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024, retries=1)
             self.assertEqual((output / "abc12345.mp4").read_bytes(), b"new!")
             self.assertEqual(result["status"], "downloaded")
             self.assertFalse(download._meta_path(partial).exists())
@@ -720,7 +775,8 @@ class CrawlerTests(unittest.TestCase):
             headers["Content-Range"] = "bytes */3"
             opener = mock.Mock()
             opener.open.side_effect = urllib.error.HTTPError(item["media_url"], 416, "range", headers, None)
-            result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024)
+            with mock.patch.object(download, "ensure_public_endpoint", return_value=item["media_url"]):
+                result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024)
             self.assertEqual(result["status"], "downloaded")
             self.assertEqual((output / "abc12345.mp4").read_bytes(), b"abc")
 
@@ -748,7 +804,9 @@ class CrawlerTests(unittest.TestCase):
                 return real_replace(source, destination)
 
             opener = mock.Mock()
-            with mock.patch.object(download.os, "replace", side_effect=replace_with_cross_device_error):
+            with mock.patch.object(download.os, "replace", side_effect=replace_with_cross_device_error), mock.patch.object(
+                download, "ensure_public_endpoint", return_value=item["media_url"]
+            ):
                 result = download.download_one(opener, item, output, partials, timeout=1, max_bytes=1024 * 1024)
 
             self.assertEqual(result["status"], "downloaded")
@@ -777,6 +835,7 @@ class CrawlerTests(unittest.TestCase):
                 json.dumps({"timestamp": "2026-07-20T08:00:00+08:00", "crawlExitCode": 1, "downloadExitCode": None, "downloadRequested": True}),
                 json.dumps({"timestamp": "2026-07-20T09:00:00+08:00", "crawlExitCode": 0, "downloadExitCode": None, "downloadRequested": False}),
                 json.dumps({"timestamp": "2026-07-20T10:00:00+08:00", "crawlExitCode": 0, "downloadExitCode": 0, "downloadRequested": True}),
+                json.dumps({"timestamp": "2026-07-20T11:00:00+08:00", "crawlExitCode": 0, "downloadExitCode": 0, "downloadRequested": True, "resultStatus": "attention", "listingFailures": 1}),
             ]), encoding="utf-8")
 
             event = task_history.latest_successful_daily_run(history, today=datetime.date(2026, 7, 20))

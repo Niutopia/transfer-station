@@ -26,6 +26,8 @@ def load_source_config(path: Path) -> dict[str, object]:
         pages_per_source = int(payload.get("pagesPerSource") or 2)
     except (TypeError, ValueError) as exc:
         raise SourceConfigError("抓取页数配置无效") from exc
+    if not 1 <= pages_per_source <= 20:
+        raise SourceConfigError("每个来源的抓取页数必须在 1 到 20 之间")
     return {"pagesPerSource": pages_per_source, "sources": sources}
 
 

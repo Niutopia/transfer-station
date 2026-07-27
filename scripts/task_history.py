@@ -34,6 +34,18 @@ def event_task_type(event: object) -> str:
     return "crawl"
 
 
+def event_result_status(event: object) -> str:
+    """Normalize task outcomes, including successful but incomplete crawls."""
+    if not isinstance(event, dict):
+        return "none"
+    explicit = str(event.get("resultStatus") or "")
+    if explicit in {"success", "attention", "failed"}:
+        return explicit
+    if event.get("crawlExitCode") == 0 and event.get("downloadExitCode") in {0, None}:
+        return "attention" if int(event.get("listingFailures") or 0) else "success"
+    return "failed"
+
+
 def latest_task_event(path: Path, task_type: str) -> dict[str, object] | None:
     """Return the newest valid history row for one task type."""
     if task_type not in {"crawl", "repair"}:
@@ -74,6 +86,7 @@ def latest_successful_daily_run(path: Path, *, today: date | None = None) -> dic
             event.get("downloadRequested") is True
             and event.get("crawlExitCode") == 0
             and event.get("downloadExitCode") == 0
+            and event_result_status(event) == "success"
         ):
             return event
     return None

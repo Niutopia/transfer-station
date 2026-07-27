@@ -766,6 +766,15 @@ def write_csv(path: Path, videos: list[Video]) -> None:
     os.replace(temporary, path)
 
 
+def pending_output_metadata(metadata: dict[str, object], processing_count: int) -> dict[str, object]:
+    """Describe a narrowed queue without replacing full-crawl totals."""
+    return {
+        **metadata,
+        "output_scope": "new_or_retry",
+        "processing_videos": processing_count,
+    }
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="抓取公开列表页，按 viewkey 去重")
     parser.add_argument("--url", dest="urls", action="append", help="公开列表 URL；可重复传入多个来源")
@@ -933,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
     write_json(args.json, videos, metadata)
     write_csv(args.csv, videos)
     if args.new_json:
-        write_json(args.new_json, processing, {**metadata, "output_scope": "new_or_retry", "unique_videos": len(processing)})
+        write_json(args.new_json, processing, pending_output_metadata(metadata, len(processing)))
     if args.new_csv:
         write_csv(args.new_csv, processing)
     if args.history:

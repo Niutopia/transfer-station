@@ -114,7 +114,7 @@ class ContentHistory:
         if self.path is None:
             return
         log_dir = self.path.parent / "logs"
-        for log_path in sorted(log_dir.glob("download-*.log")):
+        for log_path in sorted(log_dir.glob("*download-*.log")):
             try:
                 lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()
             except OSError:
@@ -272,9 +272,38 @@ def public_https_url(raw: str) -> str:
     return raw
 
 
+def ensure_public_endpoint(raw: str) -> str:
+    """Resolve a media endpoint and reject every non-global address."""
+    public_https_url(raw)
+    parsed = urllib.parse.urlsplit(raw)
+    try:
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise DownloadError("媒体 URL 端口无效") from exc
+    try:
+        results = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise DownloadError("媒体域名解析失败") from exc
+    addresses = {
+        str(sockaddr[0]).split("%", 1)[0]
+        for _family, _type, _proto, _canonname, sockaddr in results
+        if sockaddr
+    }
+    if not addresses:
+        raise DownloadError("媒体域名没有可用地址")
+    for address in addresses:
+        try:
+            endpoint = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise DownloadError("媒体域名返回了无效地址") from exc
+        if not endpoint.is_global:
+            raise DownloadError("拒绝非公网媒体地址")
+    return raw
+
+
 class SafeRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        public_https_url(newurl)
+        ensure_public_endpoint(newurl)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -510,6 +539,7 @@ def download_one(
         try:
             if rate_limiter:
                 rate_limiter.wait()
+            ensure_public_endpoint(item["media_url"])
             try:
                 response = opener.open(request, timeout=timeout)
             except urllib.error.HTTPError as exc:

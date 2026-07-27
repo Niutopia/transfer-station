@@ -44,6 +44,10 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(Object.hasOwn(status.latestRun, "lastRepairAt"), true);
   assert.equal(status.alerts.some((alert) => alert.title === "历史记录与文件不一致"), false);
   assert.equal(status.latestRun.result.rawLinks >= status.latestRun.result.uniqueVideos, true);
+  if (status.latestRun.result.taskType === "crawl") {
+    assert.equal(status.latestRun.result.uniqueVideos, status.overview.uniqueVideos);
+  }
+  assert.equal(Number.isInteger(status.latestRun.result.listingFailures), true);
   if (status.lastProgress) {
     assert.equal(["complete", "failed", "cancelled"].includes(status.lastProgress.stage), true);
     assert.equal(status.lastProgress.done <= status.lastProgress.total, true);
@@ -114,6 +118,7 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /检查完成，暂无新内容/);
   assert.match(source, /媒体不匹配/);
   assert.match(source, /错误媒体复核完成/);
+  assert.match(source, /部分榜单页面抓取失败/);
   assert.match(source, /永久跳过/);
   assert.match(source, /taskLaunching/);
   assert.match(source, /正在准备抓取任务/);

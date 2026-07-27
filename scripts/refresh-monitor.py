@@ -12,7 +12,7 @@ from pathlib import Path
 
 from download_history import sync_download_history
 from task_lock import lock_is_active, read_lock
-from task_history import event_task_type, latest_run_event, latest_successful_daily_run, latest_task_event
+from task_history import event_result_status, event_task_type, latest_run_event, latest_successful_daily_run, latest_task_event
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -257,10 +257,18 @@ def main() -> int:
     blocked_count = len(blocked_keys)
 
     alerts = []
+    listing_failures = metadata.get("listing_failures") if isinstance(metadata, dict) else []
+    listing_failure_count = len(listing_failures) if isinstance(listing_failures, list) else 0
     if not CRAWL_JSON.exists():
         alerts.append({"level": "error", "title": "缺少抓取快照", "detail": "尚未找到 videos-with-media.json。"})
     elif crawl_age_hours is not None and crawl_age_hours > 26:
         alerts.append({"level": "warning", "title": "抓取数据已过期", "detail": f"最近抓取距今 {crawl_age_hours:.1f} 小时。"})
+    if listing_failure_count:
+        alerts.append({
+            "level": "warning",
+            "title": "部分榜单页面抓取失败",
+            "detail": f"本次有 {listing_failure_count} 个列表页未成功读取，其余成功页面已保留。",
+        })
     if blocked_count:
         alerts.append({
             "level": "success",
@@ -347,6 +355,12 @@ def main() -> int:
             })
 
     unique_videos = int(metadata.get("unique_videos") or len(listed_keys))
+    latest_event_type = event_task_type(latest_event)
+    latest_event_unique = int((latest_event or {}).get("uniqueVideos") or 0)
+    if latest_event_type == "crawl":
+        # The current snapshot is the authoritative full result of the latest
+        # crawl. Older queue metadata could contain only the processing subset.
+        latest_event_unique = unique_videos
     resolved_count = len(resolved_keys)
     downloaded_count = len(completed_keys)
     handled_resolve_count = resolved_count + blocked_count
@@ -429,15 +443,14 @@ def main() -> int:
             "completedAt": completed_run.get("timestamp") if completed_today and completed_run else None,
             "result": {
                 "status": "active" if is_crawling else (
-                    "success" if latest_event and latest_event.get("crawlExitCode") == 0 and latest_event.get("downloadExitCode") in {0, None}
-                    else "failed" if latest_event else "none"
+                    event_result_status(latest_event) if latest_event else "none"
                 ),
-                "taskType": event_task_type(latest_event),
+                "taskType": latest_event_type,
                 "startedAt": latest_event.get("startedAt") if latest_event else None,
                 "finishedAt": latest_event.get("timestamp") if latest_event else None,
                 "durationSeconds": latest_event.get("durationSeconds") if latest_event else None,
                 "rawLinks": int((latest_event or {}).get("rawLinks") or raw_links),
-                "uniqueVideos": int((latest_event or {}).get("uniqueVideos") or unique_videos),
+                "uniqueVideos": latest_event_unique,
                 "skippedVideos": int((latest_event or {}).get("skippedVideos") or metadata.get("known_videos_skipped") or 0),
                 "newVideos": int((latest_event or {}).get("newVideos") or 0),
                 "retryVideos": int((latest_event or {}).get("retryVideos") or 0),
@@ -450,6 +463,11 @@ def main() -> int:
                 ),
                 "failedVideos": int((latest_event or {}).get("failedVideos") or 0),
                 "downloadedBytes": int((latest_event or {}).get("downloadedBytes") or 0),
+                "listingFailures": int(
+                    latest_event.get("listingFailures")
+                    if latest_event and "listingFailures" in latest_event
+                    else listing_failure_count if latest_event_type == "crawl" else 0
+                ),
             },
             "stages": [
                 {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},

@@ -14,6 +14,7 @@ from pathlib import Path
 
 from history_backup import create_backup
 from progress_history import archive_completed_progress
+from source_config import load_source_config
 from task_lock import TaskLock, update_lock
 
 
@@ -36,13 +37,16 @@ def run_logged(command: list[str], log_path: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pages", type=int, default=2)
+    parser.add_argument("--pages", type=int)
     parser.add_argument("--delay", type=float, default=0.5)
     parser.add_argument("--download", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
     args = parser.parse_args()
-    config = json.loads(DAILY_CONFIG.read_text(encoding="utf-8"))
-    configured_sources = config.get("sources") if isinstance(config, dict) else []
+    config = load_source_config(DAILY_CONFIG)
+    configured_sources = config["sources"]
+    pages = args.pages if args.pages is not None else int(config["pagesPerSource"])
+    if not 1 <= pages <= 20:
+        parser.error("--pages 必须在 1 到 20 之间")
     source_urls = [
         str(item.get("url"))
         for item in configured_sources
@@ -55,7 +59,7 @@ def main() -> int:
     stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
     log_path = DATA / "logs" / f"crawl-{stamp}.log"
     crawl_command = [
-        sys.executable, "crawler.py", "--pages", str(args.pages), "--delay", str(args.delay),
+        sys.executable, "crawler.py", "--pages", str(pages), "--delay", str(args.delay),
         "--listing-concurrency", "3", "--resolve-concurrency", "6", "--retries", "4",
         "--resolve-media", "--history", str(DATA / "video-history.json"),
         "--success-history", str(DATA / "download-success.txt"),
@@ -172,18 +176,22 @@ def main() -> int:
     )
     blocked_keys.discard("")
     blocked_videos = len(blocked_keys)
+    listing_failures = pending_metadata.get("listing_failures") if isinstance(pending_metadata, dict) else []
+    listing_failure_count = len(listing_failures) if isinstance(listing_failures, list) else 0
     downloaded_bytes = sum(int(item.get("bytes") or 0) for item in manifest_results if isinstance(item, dict) and item.get("status") == "downloaded")
+    task_succeeded = crawl_code == 0 and download_code in {0, None}
     event = {
         "timestamp": task_finished_at.isoformat(timespec="seconds"),
         "startedAt": task_started_at.isoformat(timespec="seconds"),
         "durationSeconds": round((task_finished_at - task_started_at).total_seconds(), 1),
         "taskType": "crawl",
-        "resultStatus": "success" if crawl_code == 0 and download_code in {0, None} else "failed",
+        "resultStatus": "attention" if task_succeeded and listing_failure_count else "success" if task_succeeded else "failed",
         "crawlExitCode": crawl_code,
         "downloadExitCode": download_code,
         "downloadRequested": args.download,
-        "pages": args.pages,
+        "pages": pages,
         "sources": len(source_urls),
+        "listingFailures": listing_failure_count,
         "rawLinks": int(pending_metadata.get("raw_detail_links") or 0),
         "uniqueVideos": int(pending_metadata.get("unique_videos") or 0),
         "skippedVideos": int(pending_metadata.get("known_videos_skipped") or 0),

@@ -338,6 +338,7 @@ button:disabled { cursor: wait !important; filter: grayscale(.35); opacity: .58;
 .task-result-card { border-left: 8px solid var(--line-soft); }
 .task-result-card.result-active { border-left-color: var(--accent); }
 .task-result-card.result-success { border-left-color: var(--green); }
+.task-result-card.result-attention { border-left-color: var(--amber); }
 .task-result-card.result-failed { border-left-color: var(--red); }
 .task-result-summary { display: block; margin-top: 15px; font-size: 13px; line-height: 1.45; }
 .task-result-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 13px; }
