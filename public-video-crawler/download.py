@@ -32,6 +32,7 @@ CHUNK_SIZE = 1024 * 1024
 SYNC_INTERVAL = 64 * 1024 * 1024
 EXPIRED_STATUS_CODES = {401, 403, 404, 410, 416}
 TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
 _dl_progress_lock = threading.RLock()
 _dl_progress_path: Path | None = None
@@ -272,6 +273,23 @@ def public_https_url(raw: str) -> str:
     return raw
 
 
+def trusted_proxy_fake_ip(hostname: str, endpoint: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Allow an explicitly trusted hostname to use a local proxy's synthetic Fake-IP."""
+    if endpoint not in PROXY_FAKE_IP_NETWORK:
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+        return False
+    except ValueError:
+        pass
+    trusted_hosts = {
+        value.strip().lower().rstrip(".")
+        for value in os.environ.get("TRUSTED_PROXY_FAKE_IP_HOSTS", "").split(",")
+        if value.strip()
+    }
+    return hostname.lower().rstrip(".") in trusted_hosts
+
+
 def ensure_public_endpoint(raw: str) -> str:
     """Resolve a media endpoint and reject every non-global address."""
     public_https_url(raw)
@@ -296,7 +314,7 @@ def ensure_public_endpoint(raw: str) -> str:
             endpoint = ipaddress.ip_address(address)
         except ValueError as exc:
             raise DownloadError("媒体域名返回了无效地址") from exc
-        if not endpoint.is_global:
+        if not endpoint.is_global and not trusted_proxy_fake_ip(parsed.hostname, endpoint):
             raise DownloadError("拒绝非公网媒体地址")
     return raw
 

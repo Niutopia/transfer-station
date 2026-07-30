@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Crawl public 91porn listing pages and deduplicate video entries.
+"""Crawl 91porn listing pages and deduplicate video entries.
 
-This tool deliberately uses no authenticated cookies and does not attempt to bypass
-VIP, paid, private, or administrator authorization checks.
+An optional local session Cookie may be used for the user's normal account access.
+VIP, paid, private, and administrator authorization checks are never bypassed.
 """
 
 from __future__ import annotations
@@ -36,6 +36,8 @@ MAX_HTML_BYTES = 8 * 1024 * 1024
 MEDIA_EXTENSIONS = {".mp4", ".m4v", ".webm", ".m3u8"}
 VIDEO_FILE_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
 SIGNATURE_KEYS = {"st", "f", "e", "sig", "signature", "token"}
+AUTH_COOKIE_ENV = "AUTH_COOKIE_FILE"
+MAX_AUTH_COOKIE_BYTES = 64 * 1024
 
 
 class CrawlerError(RuntimeError):
@@ -46,6 +48,15 @@ class MediaMismatchError(CrawlerError):
     """The detail page served media that does not belong to the listing item."""
 
     pass
+
+
+class MediaUnavailableError(CrawlerError):
+    """The detail page repeatedly exposed no usable public media source."""
+
+    pass
+
+
+BLOCKED_MEDIA_FAILURE_KINDS = {"media_mismatch", "media_unavailable"}
 
 
 @dataclass
@@ -176,7 +187,10 @@ class MediaSourceParser(HTMLParser):
 
 
 def normalize_text(value: str) -> str:
-    return " ".join(value.split())
+    # Some listing titles are double-escaped (for example, ``&amp;#39;``).
+    # HTMLParser decodes the outer layer, so decode the remaining entity before
+    # persisting the title.
+    return " ".join(html.unescape(value).split())
 
 
 def valid_viewkey(value: str) -> bool:
@@ -364,10 +378,13 @@ def matching_blocked_failures(
         current_asset = media_asset_identifier(video.thumbnail_url)
         if recorded_asset and current_asset and recorded_asset != current_asset:
             continue
+        kind = str(record.get("kind") or "media_mismatch")
+        if kind not in BLOCKED_MEDIA_FAILURE_KINDS:
+            kind = "media_mismatch"
         failures.append({
             "viewkey": video.viewkey,
-            "error": str(record.get("error") or "播放器资源与榜单不一致"),
-            "kind": "media_mismatch",
+            "error": str(record.get("error") or "媒体资源不可用"),
+            "kind": kind,
             "persistent": True,
         })
     return failures
@@ -378,7 +395,7 @@ def update_blocked_media_history(
     videos: Iterable[Video],
     failures: Iterable[dict[str, object]],
 ) -> None:
-    """Persist confirmed identity mismatches so later crawls do not retry them."""
+    """Persist confirmed unusable media so later crawls do not retry it."""
     if path is None:
         return
     items = load_blocked_media_history(path)
@@ -386,7 +403,8 @@ def update_blocked_media_history(
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
     changed = False
     for failure in failures:
-        if str(failure.get("kind") or "") != "media_mismatch":
+        kind = str(failure.get("kind") or "")
+        if kind not in BLOCKED_MEDIA_FAILURE_KINDS:
             continue
         viewkey = str(failure.get("viewkey") or "")
         video = videos_by_key.get(viewkey)
@@ -395,7 +413,8 @@ def update_blocked_media_history(
         previous = items.get(viewkey, {})
         items[viewkey] = {
             "expectedAsset": media_asset_identifier(video.thumbnail_url),
-            "error": str(failure.get("error") or "播放器资源与榜单不一致"),
+            "error": str(failure.get("error") or "媒体资源不可用"),
+            "kind": kind,
             "firstSeenAt": str(previous.get("firstSeenAt") or now),
             "lastSeenAt": now,
         }
@@ -456,8 +475,59 @@ def select_for_processing(
     return processing, new_count, retry_count, skipped_count
 
 
-def build_opener() -> urllib.request.OpenerDirector:
+def configured_auth_cookie_file() -> Path | None:
+    raw = os.environ.get(AUTH_COOKIE_ENV, "").strip()
+    return Path(raw) if raw else None
+
+
+def load_auth_cookie_jar(path: Path | None = None) -> http.cookiejar.CookieJar:
+    """Load a raw Cookie header from a local file without exposing it to logs."""
     jar = http.cookiejar.CookieJar()
+    cookie_path = path or configured_auth_cookie_file()
+    if cookie_path is None:
+        return jar
+    try:
+        if cookie_path.stat().st_size > MAX_AUTH_COOKIE_BYTES:
+            raise CrawlerError("登录 Cookie 文件超过 64 KiB")
+        raw = cookie_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return jar
+    except (OSError, UnicodeError) as exc:
+        raise CrawlerError("无法读取登录 Cookie 文件") from exc
+    if not raw or raw == "PASTE_NEW_COOKIE_HERE":
+        return jar
+    for fragment in raw.split(";"):
+        name, separator, value = fragment.strip().partition("=")
+        if not separator or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+            continue
+        jar.set_cookie(http.cookiejar.Cookie(
+            version=0,
+            name=name,
+            value=value,
+            port=None,
+            port_specified=False,
+            domain=".91porn.com",
+            domain_specified=True,
+            domain_initial_dot=True,
+            path="/",
+            path_specified=True,
+            secure=True,
+            expires=None,
+            discard=True,
+            comment=None,
+            comment_url=None,
+            rest={"HttpOnly": None},
+            rfc2109=False,
+        ))
+    return jar
+
+
+def auth_cookie_configured(path: Path | None = None) -> bool:
+    return any(True for _cookie in load_auth_cookie_jar(path))
+
+
+def build_opener(cookie_file: Path | None = None) -> urllib.request.OpenerDirector:
+    jar = load_auth_cookie_jar(cookie_file)
     return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 
 
@@ -682,10 +752,15 @@ def resolve_media(
     failures: list[dict[str, str]] = []
 
     def failure_record(video: Video, exc: Exception) -> dict[str, str]:
+        kind = (
+            "media_mismatch" if isinstance(exc, MediaMismatchError)
+            else "media_unavailable" if isinstance(exc, MediaUnavailableError)
+            else "resolve_error"
+        )
         return {
             "viewkey": video.viewkey,
             "error": str(exc),
-            "kind": "media_mismatch" if isinstance(exc, MediaMismatchError) else "resolve_error",
+            "kind": kind,
         }
 
     def worker_opener() -> urllib.request.OpenerDirector:
@@ -702,18 +777,36 @@ def resolve_media(
             # place; otherwise a blocked mismatch could still reach download.py.
             video.media_url = ""
             video.resolved_at = ""
-            body = fetch_html(
-                opener if concurrency <= 1 else worker_opener(),
-                video.canonical_url,
-                timeout=timeout,
-                user_agent=user_agent,
-                retries=retries,
-                rate_limiter=rate_limiter,
-            )
-            sources, posters = extract_player_media(body)
-            validate_player_identity(video, sources, posters)
-            video.media_url = choose_media_url(sources)
-            video.resolved_at = time.strftime("%Y-%m-%dT%H:%M:%S%z") if video.media_url else ""
+            # The site occasionally serves an unrelated legacy player while the
+            # surrounding detail page is correct. Re-fetch a mismatch before
+            # permanently safety-blocking the item.
+            identity_attempts = max(1, min(3, retries + 1))
+            for identity_attempt in range(identity_attempts):
+                body = fetch_html(
+                    opener if concurrency <= 1 else worker_opener(),
+                    video.canonical_url,
+                    timeout=timeout,
+                    user_agent=user_agent,
+                    retries=retries,
+                    rate_limiter=rate_limiter,
+                )
+                sources, posters = extract_player_media(body)
+                try:
+                    validate_player_identity(video, sources, posters)
+                except MediaMismatchError:
+                    if identity_attempt + 1 >= identity_attempts:
+                        raise
+                    continue
+                media_url = choose_media_url(sources)
+                if not media_url:
+                    if identity_attempt + 1 >= identity_attempts:
+                        raise MediaUnavailableError(
+                            f"详情页未发现可下载媒体（viewkey={video.viewkey}，已复核 {identity_attempts} 次）"
+                        )
+                    continue
+                video.media_url = media_url
+                video.resolved_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                break
         finally:
             with done_lock:
                 _progress_done += 1
@@ -886,8 +979,12 @@ def main(argv: list[str] | None = None) -> int:
     if asset_duplicate_keys:
         append_success_keys(args.success_history, asset_duplicate_keys)
         success_keys.update(asset_duplicate_keys)
+    authenticated = auth_cookie_configured()
     blocked_history = load_blocked_media_history(args.blocked_history)
-    persisted_block_failures = matching_blocked_failures(videos, blocked_history, success_keys=success_keys)
+    persisted_block_failures = (
+        [] if authenticated
+        else matching_blocked_failures(videos, blocked_history, success_keys=success_keys)
+    )
     persisted_block_keys = {str(item["viewkey"]) for item in persisted_block_failures}
     for video in videos:
         if video.viewkey in persisted_block_keys:
@@ -936,7 +1033,7 @@ def main(argv: list[str] | None = None) -> int:
         "resolve_failures": resolve_failures,
         "persisted_blocked_skipped": len(persisted_block_failures),
         "detail_pages_requested": len(processing) if args.resolve_media else 0,
-        "authenticated": False,
+        "authenticated": authenticated,
         "media_resolved": bool(args.resolve_media),
     }
     write_json(args.json, videos, metadata)

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import shutil
@@ -156,7 +157,7 @@ def main() -> int:
         configured_sources = []
 
     title_by_key = {
-        str(video.get("viewkey")): str(video.get("title") or "未命名视频")
+        str(video.get("viewkey")): html.unescape(str(video.get("title") or "未命名视频"))
         for video in videos
         if isinstance(video, dict) and video.get("viewkey")
     }
@@ -179,18 +180,18 @@ def main() -> int:
     resolve_failures = metadata.get("resolve_failures") if isinstance(metadata, dict) else []
     if not isinstance(resolve_failures, list):
         resolve_failures = []
-    mismatch_failure_keys = {
+    blocked_failure_keys = {
         str(item.get("viewkey"))
         for item in resolve_failures
         if isinstance(item, dict)
         and item.get("viewkey")
         and (
-            item.get("kind") == "media_mismatch"
+            item.get("kind") in {"media_mismatch", "media_unavailable"}
             or "详情页媒体与榜单不一致" in str(item.get("error") or "")
         )
     }
     unresolved_keys = listed_keys - resolved_keys
-    blocked_keys = unresolved_keys & mismatch_failure_keys
+    blocked_keys = unresolved_keys & blocked_failure_keys
     unresolved_error_keys = unresolved_keys - blocked_keys
     blocked_count = len(blocked_keys)
     total_bytes = sum(item["sizeBytes"] for item in files)
@@ -270,16 +271,33 @@ def main() -> int:
             "detail": f"本次有 {listing_failure_count} 个列表页未成功读取，其余成功页面已保留。",
         })
     if blocked_count:
+        mismatch_count = sum(
+            1 for item in resolve_failures
+            if isinstance(item, dict)
+            and str(item.get("viewkey") or "") in blocked_keys
+            and item.get("kind") == "media_mismatch"
+        )
+        unavailable_count = blocked_count - mismatch_count
+        reasons = []
+        if mismatch_count:
+            reasons.append(f"{mismatch_count} 个播放器资源与榜单不一致")
+        if unavailable_count:
+            reasons.append(f"{unavailable_count} 个详情页没有可下载媒体")
         alerts.append({
             "level": "success",
-            "title": f"已拦截 {blocked_count} 个错误媒体地址",
-            "detail": "播放器资源与榜单不一致，已停止下载，不会写入中转站。",
+            "title": f"已安全跳过 {blocked_count} 个不可用媒体",
+            "detail": "，".join(reasons) + "；均不会写入中转站。",
         })
     if unresolved_error_keys:
         alerts.append({"level": "warning", "title": "存在未解析媒体", "detail": f"{len(unresolved_error_keys)} 个条目因解析错误缺少媒体地址。"})
     if partials and not is_crawling:
         alerts.append({"level": "warning", "title": "发现未完成下载", "detail": f"临时目录有 {len(partials)} 个 .part 文件。"})
-    unresolved_manifest_failures = [item for item in manifest_failures if str(item.get("viewkey") or "") not in completed_keys]
+    unresolved_manifest_failures = [
+        item
+        for item in manifest_failures
+        if str(item.get("viewkey") or "") not in completed_keys
+        and str(item.get("viewkey") or "") not in blocked_keys
+    ]
     if unresolved_manifest_failures:
         alerts.append({"level": "error", "title": "最近下载有失败项", "detail": f"下载清单记录 {len(unresolved_manifest_failures)} 个尚未恢复的失败。"})
     if not alerts:

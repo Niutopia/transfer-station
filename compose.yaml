@@ -10,6 +10,10 @@ services:
       - "127.0.0.1:3000:3000"
     environment:
       TZ: Asia/Shanghai
+      # Clash/Mihomo Fake-IP is accepted only for this known public media host.
+      TRUSTED_PROXY_FAKE_IP_HOSTS: la.btc620.com
+      # Read locally mounted session data without putting secrets in the image.
+      AUTH_COOKIE_FILE: /app/data/auth-cookie.txt
     volumes:
       - ./data:/app/data
       - ./history-backups:/app/history-backups

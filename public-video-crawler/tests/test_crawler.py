@@ -267,6 +267,15 @@ class CrawlerTests(unittest.TestCase):
             "https://91porn.com/view_video.php?viewkey=abc12345",
         )
 
+    def test_parser_decodes_double_escaped_title_entities(self) -> None:
+        body = """
+        <a href="/view_video.php?viewkey=abc12345&amp;c=llzvq">
+          <span class="video-title">A girl&amp;#39;s &amp;quot;day date&amp;quot;</span>
+        </a>
+        """
+        videos = crawler.parse_listing(body, crawler.DEFAULT_URL, 1)
+        self.assertEqual(videos[0].title, 'A girl\'s "day date"')
+
     def test_merge_deduplicates_across_pages(self) -> None:
         first = crawler.parse_listing(FIXTURE, crawler.DEFAULT_URL, 1)
         second = crawler.parse_listing(FIXTURE, crawler.DEFAULT_URL, 2)
@@ -382,6 +391,22 @@ class CrawlerTests(unittest.TestCase):
         candidates, blocked = repair_pending.collect_repair_candidates(snapshot, {"completed"})
         self.assertEqual([item["viewkey"] for item in candidates], ["retry"])
         self.assertEqual(blocked, {"blocked"})
+
+    def test_repair_candidates_exclude_confirmed_unavailable_media(self) -> None:
+        snapshot = {
+            "metadata": {"resolve_failures": [{
+                "viewkey": "unavailable",
+                "kind": "media_unavailable",
+                "error": "详情页未发现可下载媒体",
+            }]},
+            "videos": [{
+                "viewkey": "unavailable",
+                "canonical_url": "https://91porn.com/view_video.php?viewkey=unavailable",
+            }],
+        }
+        candidates, blocked = repair_pending.collect_repair_candidates(snapshot, set())
+        self.assertEqual(candidates, [])
+        self.assertEqual(blocked, {"unavailable"})
 
     def test_download_time_block_does_not_make_unresolved_count_negative(self) -> None:
         blocked, unresolved = repair_pending.summarize_repair_failures(
@@ -506,6 +531,44 @@ class CrawlerTests(unittest.TestCase):
                 download.ensure_public_endpoint("https://media.example.test/video.mp4"),
                 "https://media.example.test/video.mp4",
             )
+
+    def test_auth_cookie_file_is_scoped_to_the_target_site(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "auth-cookie.txt"
+            path.write_text("session=secret; preference=compact\n", encoding="utf-8")
+            cookies = list(crawler.load_auth_cookie_jar(path))
+        self.assertEqual({cookie.name for cookie in cookies}, {"session", "preference"})
+        self.assertTrue(all(cookie.domain == ".91porn.com" for cookie in cookies))
+        self.assertTrue(all(cookie.secure for cookie in cookies))
+
+    def test_auth_cookie_placeholder_is_not_treated_as_a_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "auth-cookie.txt"
+            path.write_text("PASTE_NEW_COOKIE_HERE\n", encoding="utf-8")
+            self.assertFalse(crawler.auth_cookie_configured(path))
+
+    def test_proxy_fake_ip_is_rejected_without_an_explicitly_trusted_host(self) -> None:
+        resolved = [(2, 1, 6, "", ("198.18.0.75", 443))]
+        with mock.patch.object(download.socket, "getaddrinfo", return_value=resolved):
+            with mock.patch.dict(os.environ, {"TRUSTED_PROXY_FAKE_IP_HOSTS": ""}):
+                with self.assertRaisesRegex(download.DownloadError, "非公网"):
+                    download.ensure_public_endpoint("https://media.example.test/video.mp4")
+
+    def test_proxy_fake_ip_is_accepted_for_an_explicitly_trusted_host(self) -> None:
+        resolved = [(2, 1, 6, "", ("198.18.0.75", 443))]
+        with mock.patch.object(download.socket, "getaddrinfo", return_value=resolved):
+            with mock.patch.dict(os.environ, {"TRUSTED_PROXY_FAKE_IP_HOSTS": "media.example.test"}):
+                self.assertEqual(
+                    download.ensure_public_endpoint("https://media.example.test/video.mp4"),
+                    "https://media.example.test/video.mp4",
+                )
+
+    def test_proxy_fake_ip_allowlist_does_not_allow_other_reserved_ranges(self) -> None:
+        resolved = [(2, 1, 6, "", ("127.0.0.1", 443))]
+        with mock.patch.object(download.socket, "getaddrinfo", return_value=resolved):
+            with mock.patch.dict(os.environ, {"TRUSTED_PROXY_FAKE_IP_HOSTS": "media.example.test"}):
+                with self.assertRaisesRegex(download.DownloadError, "非公网"):
+                    download.ensure_public_endpoint("https://media.example.test/video.mp4")
 
     def test_download_manifest_loader_deduplicates_key_and_url(self) -> None:
         payload = {"videos": [
@@ -685,6 +748,49 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(videos[0].media_url, "")
         self.assertEqual(videos[0].resolved_at, "")
         self.assertTrue(download.is_media_mismatch_error(crawler.MediaMismatchError(failures[0]["error"])))
+
+    def test_media_mismatch_is_refetched_before_being_blocked(self) -> None:
+        video = crawler.Video(
+            viewkey="abc12345",
+            canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+            thumbnail_url="https://media.example.test/thumb/1227000.jpg",
+        )
+        wrong = '<video poster="https://media.example.test/thumb/800000.jpg"><source src="https://media.example.test/800000.mp4"></video>'
+        correct = '<video poster="https://media.example.test/thumb/1227000.jpg"><source src="https://media.example.test/1227000.mp4"></video>'
+        with mock.patch.object(crawler, "fetch_html", side_effect=[wrong, correct]) as fetch:
+            failures = crawler.resolve_media(
+                crawler.build_opener(),
+                [video],
+                timeout=1,
+                delay=0,
+                user_agent="test",
+                concurrency=1,
+                retries=1,
+                continue_on_error=True,
+            )
+        self.assertEqual(failures, [])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertIn("1227000.mp4", video.media_url)
+
+    def test_missing_media_is_rechecked_and_safely_blocked(self) -> None:
+        video = crawler.Video(
+            viewkey="abc12345",
+            canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+        )
+        with mock.patch.object(crawler, "fetch_html", return_value="<html><body>No player</body></html>") as fetch:
+            failures = crawler.resolve_media(
+                crawler.build_opener(),
+                [video],
+                timeout=1,
+                delay=0,
+                user_agent="test",
+                concurrency=1,
+                retries=2,
+                continue_on_error=True,
+            )
+        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(failures[0]["kind"], "media_unavailable")
+        self.assertIn("已复核 3 次", failures[0]["error"])
 
     def test_persisted_media_mismatch_skips_only_the_same_listing_asset(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

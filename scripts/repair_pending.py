@@ -62,11 +62,11 @@ def existing_keys(directory: Path) -> set[str]:
     }
 
 
-def is_mismatch_failure(item: object) -> bool:
+def is_blocked_failure(item: object) -> bool:
     return bool(
         isinstance(item, dict)
         and (
-            item.get("kind") == "media_mismatch"
+            item.get("kind") in crawler.BLOCKED_MEDIA_FAILURE_KINDS
             or "详情页媒体与榜单不一致" in str(item.get("error") or "")
         )
     )
@@ -76,32 +76,34 @@ def summarize_repair_failures(
     failures: list[dict[str, str]],
     manifest_rows: list[object],
 ) -> tuple[int, int]:
-    resolver_mismatch_keys = {
+    resolver_blocked_keys = {
         str(item.get("viewkey") or "")
         for item in failures
-        if is_mismatch_failure(item)
+        if is_blocked_failure(item)
     }
     download_blocked_keys = {
         str(row.get("viewkey") or "")
         for row in manifest_rows
         if isinstance(row, dict) and row.get("status") == "blocked"
     }
-    mismatch_keys = (resolver_mismatch_keys | download_blocked_keys) - {""}
-    unresolved_count = sum(1 for item in failures if not is_mismatch_failure(item))
-    return len(mismatch_keys), unresolved_count
+    blocked_keys = (resolver_blocked_keys | download_blocked_keys) - {""}
+    unresolved_count = sum(1 for item in failures if not is_blocked_failure(item))
+    return len(blocked_keys), unresolved_count
 
 
 def collect_repair_candidates(
     snapshot: object,
     completed_keys: set[str],
+    *,
+    retry_blocked: bool = False,
 ) -> tuple[list[dict[str, object]], set[str]]:
     if not isinstance(snapshot, dict):
         return [], set()
     metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
     failures = metadata.get("resolve_failures") if isinstance(metadata, dict) else []
-    blocked_keys = {
+    blocked_keys = set() if retry_blocked else {
         str(item.get("viewkey"))
-        for item in failures if is_mismatch_failure(item) and item.get("viewkey")
+        for item in failures if is_blocked_failure(item) and item.get("viewkey")
     } if isinstance(failures, list) else set()
     videos = snapshot.get("videos") if isinstance(snapshot.get("videos"), list) else []
     candidates: list[dict[str, object]] = []
@@ -151,6 +153,7 @@ def update_snapshot(
         item for item in previous_failures
         if isinstance(item, dict) and str(item.get("viewkey") or "") not in attempted_keys
     ] + failures
+    metadata["authenticated"] = crawler.auth_cookie_configured()
     snapshot["metadata"] = metadata
     atomic_json(SNAPSHOT, snapshot)
 
@@ -176,7 +179,11 @@ def run_repair(lock_path: Path) -> int:
     if not isinstance(snapshot, dict):
         snapshot = {}
     completed = success_keys(DATA / "download-success.txt") | existing_keys(STAGING)
-    candidate_dicts, _ = collect_repair_candidates(snapshot, completed)
+    candidate_dicts, _ = collect_repair_candidates(
+        snapshot,
+        completed,
+        retry_blocked=crawler.auth_cookie_configured(),
+    )
     archive_completed_progress(DATA / "download-progress.json", DATA / "last-completed-progress.json")
 
     attempted = [as_video(raw) for raw in candidate_dicts]
