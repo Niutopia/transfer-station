@@ -79,6 +79,10 @@ export default defineConfig(async () => {
               }
               const proxyHeaders = new Headers({ 'content-type': req.headers['content-type'] || 'application/json' });
               if (req.headers.origin) proxyHeaders.set('origin', req.headers.origin);
+              // Preserve the browser-facing origin so the local API can enforce
+              // an exact same-origin boundary in development as it does in nginx.
+              if (req.headers.host) proxyHeaders.set('x-forwarded-host', req.headers.host);
+              proxyHeaders.set('x-forwarded-proto', 'http');
               const proxy = await fetch(`http://127.0.0.1:3001${req.url}`, {
                 method,
                 headers: proxyHeaders,

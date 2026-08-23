@@ -13,7 +13,7 @@ from pathlib import Path
 
 from download_history import sync_download_history
 from task_lock import lock_is_active, read_lock
-from task_history import event_result_status, event_task_type, latest_run_event, latest_successful_daily_run, latest_task_event
+from task_history import event_counter, event_result_status, event_task_type, latest_run_event, latest_successful_daily_run, latest_task_event
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -23,10 +23,10 @@ CRAWL_JSON = CRAWLER / "videos-with-media.json"
 DAILY_CONFIG = PROJECT / "config" / "daily-sources.json"
 DATA = PROJECT / "data"
 DOWNLOAD_MANIFEST = DATA / "download-manifest.json"
+IGNORED_MEDIA = DATA / "ignored-media.json"
 PARTIAL_DIR = DATA / "partials"
 OUTPUT = PROJECT / "public" / "status.json"
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
-STAGING_CACHE = DATA / "staging-index-cache.json"
 RUN_HISTORY = DATA / "run-history.jsonl"
 LAST_COMPLETED_PROGRESS = DATA / "last-completed-progress.json"
 DOWNLOAD_HISTORY = DATA / "download-history.json"
@@ -41,6 +41,22 @@ def load_json(path: Path, fallback):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return fallback
+
+
+def load_ignored_media_keys(path: Path) -> set[str]:
+    """Read the explicit, reversible user ignore list without mutating it."""
+    payload = load_json(path, {})
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if isinstance(items, dict):
+        candidates = items.keys()
+    elif isinstance(items, list):
+        candidates = (
+            item.get("viewkey") if isinstance(item, dict) else item
+            for item in items
+        )
+    else:
+        return set()
+    return {str(key) for key in candidates if str(key or "").strip()}
 
 
 def hours_since(value: object, now: datetime) -> float | None:
@@ -72,6 +88,8 @@ def serialize_download_progress(progress, *, blocked_failures: int = 0, true_fai
         failed = 0
     return {
         "stage": stage,
+        "route": progress.get("route"),
+        "routeProbe": progress.get("routeProbe"),
         "done": int(progress.get("done", 0)),
         "total": int(progress.get("total", 0)),
         "active": progress.get("active", []),
@@ -91,20 +109,6 @@ def scan_files():
     files = []
     if not STAGING.exists():
         STAGING.mkdir(parents=True, exist_ok=True)
-    try:
-        marker = STAGING.stat().st_mtime_ns
-    except OSError:
-        marker = 0
-    cached = load_json(STAGING_CACHE, {})
-    cached_rows = cached.get("files") if isinstance(cached, dict) and cached.get("marker") == marker else None
-    if isinstance(cached_rows, list):
-        for row in cached_rows:
-            if not isinstance(row, dict) or not row.get("relativePath"):
-                continue
-            path = STAGING / str(row["relativePath"])
-            if path.suffix.lower() in VIDEO_EXTENSIONS:
-                files.append({**row, "path": path})
-        return files
     for path in STAGING.rglob("*"):
         if not path.is_file():
             continue
@@ -122,15 +126,6 @@ def scan_files():
         }
         if path.suffix.lower() in VIDEO_EXTENSIONS:
             files.append(item)
-    cache_rows = [{key: value for key, value in item.items() if key != "path"} for item in files]
-    try:
-        STAGING_CACHE.parent.mkdir(parents=True, exist_ok=True)
-        temporary = STAGING_CACHE.with_suffix(STAGING_CACHE.suffix + ".tmp")
-        temporary.write_text(json.dumps({"marker": marker, "files": cache_rows}, ensure_ascii=False), encoding="utf-8")
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, STAGING_CACHE)
-    except OSError:
-        pass
     return files
 
 
@@ -162,6 +157,7 @@ def main() -> int:
         if isinstance(video, dict) and video.get("viewkey")
     }
     listed_keys = set(title_by_key)
+    configured_ignored_keys = load_ignored_media_keys(IGNORED_MEDIA)
 
     success_keys = set()
     success_file = DATA / "download-success.txt"
@@ -171,12 +167,16 @@ def main() -> int:
     partials = scan_partials()
     downloaded_keys = {item["path"].stem for item in files if item["path"].stem in listed_keys}
     completed_keys = listed_keys & (success_keys | downloaded_keys)
+    # Keep the configured count visible even if an ignored item later appears
+    # in the success ledger; ignored entries belong to the ignored bucket, not
+    # to the eligible downloaded inventory.
+    ignored_keys = listed_keys & configured_ignored_keys
 
     resolved_keys = {
         str(video.get("viewkey"))
         for video in videos
         if isinstance(video, dict) and video.get("viewkey") and (video.get("media_url") or str(video.get("viewkey")) in completed_keys)
-    }
+    } - ignored_keys
     resolve_failures = metadata.get("resolve_failures") if isinstance(metadata, dict) else []
     if not isinstance(resolve_failures, list):
         resolve_failures = []
@@ -190,7 +190,7 @@ def main() -> int:
             or "详情页媒体与榜单不一致" in str(item.get("error") or "")
         )
     }
-    unresolved_keys = listed_keys - resolved_keys
+    unresolved_keys = listed_keys - resolved_keys - ignored_keys
     blocked_keys = unresolved_keys & blocked_failure_keys
     unresolved_error_keys = unresolved_keys - blocked_keys
     blocked_count = len(blocked_keys)
@@ -223,9 +223,14 @@ def main() -> int:
     latest_event = latest_run_event(RUN_HISTORY)
     latest_crawl_event = latest_task_event(RUN_HISTORY, "crawl")
     latest_repair_event = latest_task_event(RUN_HISTORY, "repair")
+    latest_event_type = event_task_type(latest_event)
+    latest_event_status = event_result_status(latest_event)
+    latest_event_listing_failures = event_counter(latest_event, "listingFailures")
     latest_crawl_at = str((latest_crawl_event or {}).get("timestamp") or snapshot_updated_at or "") or None
     latest_repair_at = str((latest_repair_event or {}).get("timestamp") or "") or None
-    crawl_age_hours = hours_since(latest_crawl_at, now)
+    # Failed attempts do not refresh the crawl snapshot. Its own mtime is the
+    # truthful freshness signal; using the latest attempt hid stale data.
+    crawl_age_hours = hours_since(snapshot_updated_at, now)
 
     manifest = load_json(DOWNLOAD_MANIFEST, [])
     manifest_failures = []
@@ -252,14 +257,50 @@ def main() -> int:
             and str(item.get("viewkey") or "") not in manifest_blocked_keys
         ]
     blocked_keys.update(listed_keys & manifest_blocked_keys)
-    unresolved_keys = listed_keys - resolved_keys
+    unresolved_keys = listed_keys - resolved_keys - ignored_keys
     blocked_keys &= unresolved_keys
     unresolved_error_keys = unresolved_keys - blocked_keys
     blocked_count = len(blocked_keys)
 
+    # The snapshot is a long-lived inventory, while a crawl event only covers
+    # the new/retry items selected by that run.  Do not turn every old item
+    # without a media URL into a failure for the latest (often no-op) crawl.
+    # A successful crawl writes the resolver failures for that run; when the
+    # latest task is a repair, the snapshot may still contain failures from
+    # earlier crawls, so those are deliberately treated as backlog here.
+    current_failure_keys: set[str] = set()
+    if latest_event_type == "crawl" and latest_event_status in {"success", "attention"}:
+        current_failure_keys = {
+            str(item.get("viewkey"))
+            for item in resolve_failures
+            if isinstance(item, dict) and item.get("viewkey")
+        } & unresolved_keys
+    current_unresolved_error_keys = current_failure_keys - blocked_keys
+    historical_unresolved_keys = unresolved_keys - current_failure_keys
+    latest_crawl_no_work = bool(
+        latest_event_type == "crawl"
+        and latest_event_status == "success"
+        and isinstance(latest_event, dict)
+        and "newVideos" in latest_event
+        and "retryVideos" in latest_event
+        and event_counter(latest_event, "newVideos") == 0
+        and event_counter(latest_event, "retryVideos") == 0
+    )
+
     alerts = []
     listing_failures = metadata.get("listing_failures") if isinstance(metadata, dict) else []
     listing_failure_count = len(listing_failures) if isinstance(listing_failures, list) else 0
+    if latest_event_status == "failed":
+        failed_scope = (
+            f"，{latest_event_listing_failures} 个榜单页面未成功读取"
+            if latest_event_listing_failures
+            else ""
+        )
+        alerts.append({
+            "level": "error",
+            "title": "最近一次任务执行失败",
+            "detail": f"任务结果已按本次实际数据归零{failed_scope}；上次成功快照仅用于历史总览。",
+        })
     if not CRAWL_JSON.exists():
         alerts.append({"level": "error", "title": "缺少抓取快照", "detail": "尚未找到 videos-with-media.json。"})
     elif crawl_age_hours is not None and crawl_age_hours > 26:
@@ -288,8 +329,27 @@ def main() -> int:
             "title": f"已安全跳过 {blocked_count} 个不可用媒体",
             "detail": "，".join(reasons) + "；均不会写入中转站。",
         })
-    if unresolved_error_keys:
-        alerts.append({"level": "warning", "title": "存在未解析媒体", "detail": f"{len(unresolved_error_keys)} 个条目因解析错误缺少媒体地址。"})
+    if current_unresolved_error_keys:
+        alerts.append({
+            "level": "warning",
+            "scope": "task",
+            "title": "本次有未解析媒体",
+            "detail": f"本次任务有 {len(current_unresolved_error_keys)} 个条目因解析错误缺少媒体地址。",
+        })
+    if historical_unresolved_keys:
+        alerts.append({
+            "level": "info",
+            "scope": "backlog",
+            "title": "存在历史待复核项",
+            "detail": f"{len(historical_unresolved_keys)} 个条目未在本次任务中重试；点击“复核待处理项”时才会发起低频详情页请求。",
+        })
+    if ignored_keys:
+        alerts.append({
+            "level": "info",
+            "scope": "backlog",
+            "title": f"已忽略 {len(ignored_keys)} 个无媒体条目",
+            "detail": "这些条目按用户确认永久跳过，不会进入日常抓取或复核队列；移除 ignored-media.json 中对应记录即可恢复。",
+        })
     if partials and not is_crawling:
         alerts.append({"level": "warning", "title": "发现未完成下载", "detail": f"临时目录有 {len(partials)} 个 .part 文件。"})
     unresolved_manifest_failures = [
@@ -357,7 +417,7 @@ def main() -> int:
     pending_downloads = []
     if not is_crawling:
         for key, partial in sorted(partial_by_key.items()):
-            if key in resolved_keys and key not in completed_keys:
+            if key in resolved_keys and key not in completed_keys and key not in ignored_keys:
                 pending_downloads.append({
                     "name": title_by_key.get(key, key),
                     "fileName": partial.name,
@@ -365,7 +425,7 @@ def main() -> int:
                     "status": "resumable",
                 })
     for key, title in title_by_key.items():
-        if key in resolved_keys and key not in completed_keys and key not in active_keys:
+        if key in resolved_keys and key not in completed_keys and key not in active_keys and key not in ignored_keys:
             pending_downloads.append({
                 "name": title,
                 "fileName": f"{key}.mp4",
@@ -373,30 +433,85 @@ def main() -> int:
             })
 
     unique_videos = int(metadata.get("unique_videos") or len(listed_keys))
-    latest_event_type = event_task_type(latest_event)
-    latest_event_unique = int((latest_event or {}).get("uniqueVideos") or 0)
-    if latest_event_type == "crawl":
-        # The current snapshot is the authoritative full result of the latest
-        # crawl. Older queue metadata could contain only the processing subset.
-        latest_event_unique = unique_videos
     resolved_count = len(resolved_keys)
-    downloaded_count = len(completed_keys)
-    handled_resolve_count = resolved_count + blocked_count
-    handled_download_count = downloaded_count + blocked_count
+    downloaded_count = len(completed_keys - ignored_keys)
+    handled_resolve_count = resolved_count + blocked_count + len(ignored_keys)
+    handled_download_count = downloaded_count + blocked_count + len(ignored_keys)
     pending_count = max(0, unique_videos - handled_download_count)
     raw_links = int(metadata.get("raw_detail_links") or unique_videos)
     duplicates = int(metadata.get("duplicates_removed") or max(0, raw_links - unique_videos))
-    has_attention = any(alert.get("level") in {"warning", "error"} for alert in alerts)
-    run_status = "active" if is_crawling else ("ready" if unique_videos and handled_download_count == unique_videos and not has_attention else "attention")
+    latest_result_raw_links = event_counter(latest_event, "rawLinks", raw_links)
+    latest_result_unique = event_counter(latest_event, "uniqueVideos", unique_videos)
+    latest_result_skipped = event_counter(latest_event, "skippedVideos", int(metadata.get("known_videos_skipped") or 0))
+    latest_result_ignored = event_counter(
+        latest_event,
+        "ignoredVideos",
+        len(ignored_keys) if latest_crawl_no_work else 0,
+    )
+    has_attention = any(
+        alert.get("scope") != "backlog" and alert.get("level") in {"warning", "error"}
+        for alert in alerts
+    )
+    if is_crawling:
+        run_status = "active"
+    elif latest_event_status == "success" and not has_attention:
+        # A successful new-only crawl is ready even when the inventory still
+        # has an explicit, separately actionable repair backlog.
+        run_status = "ready"
+    elif latest_event_status == "none" and unique_videos and handled_download_count == unique_videos and not has_attention:
+        run_status = "ready"
+    else:
+        run_status = "attention"
     completed_run = latest_successful_daily_run(RUN_HISTORY, today=today)
     completed_today = bool(
         completed_run
         and not is_crawling
-        and unique_videos
-        and handled_resolve_count == unique_videos
-        and handled_download_count == unique_videos
+        and latest_event_type == "crawl"
+        and latest_event_status == "success"
         and not partials
+        and not current_unresolved_error_keys
+        and latest_event_listing_failures == 0
+        and not unresolved_manifest_failures
     )
+    failed_crawl = not is_crawling and latest_event_type == "crawl" and latest_event_status == "failed"
+    if failed_crawl:
+        stages = [
+            {
+                "name": "列表抓取",
+                "status": "attention",
+                "value": latest_result_raw_links,
+                "note": f"{latest_event_listing_failures} 个页面失败" if latest_event_listing_failures else "任务未完成",
+            },
+            {"name": "去重", "status": "waiting", "value": latest_result_unique, "note": "等待榜单抓取成功"},
+            {"name": "媒体解析", "status": "waiting", "value": 0, "note": "本次未进入该阶段"},
+            {"name": "下载入库", "status": "waiting", "value": 0, "note": "本次未进入该阶段"},
+        ]
+    elif latest_crawl_no_work:
+        stages = [
+            {"name": "列表抓取", "status": "done", "value": latest_result_raw_links, "note": "本次榜单读取成功"},
+            {"name": "去重", "status": "done", "value": latest_result_unique, "note": "本次无新增详情"},
+            {"name": "媒体解析", "status": "done", "value": 0, "note": "本次无新增条目，未请求详情页"},
+            {"name": "下载入库", "status": "done", "value": 0, "note": "本次无新增条目，无需下载"},
+        ]
+    elif latest_event_type == "crawl" and latest_event_status in {"success", "attention"}:
+        attempted = event_counter(latest_event, "newVideos") + event_counter(latest_event, "retryVideos")
+        event_blocked = event_counter(latest_event, "blockedVideos")
+        event_failed = event_counter(latest_event, "failedVideos")
+        media_value = max(0, attempted - event_blocked - event_failed)
+        stage_status = "attention" if latest_event_status == "attention" or event_failed else "done"
+        stages = [
+            {"name": "列表抓取", "status": "done" if not latest_event_listing_failures else "attention", "value": latest_result_raw_links, "note": "原始详情链接"},
+            {"name": "去重", "status": "done", "value": latest_result_unique, "note": f"移除 {duplicates} 个重复"},
+            {"name": "媒体解析", "status": stage_status, "value": media_value, "note": f"本次处理 {attempted} 个详情，安全拦截 {event_blocked} 个" if event_blocked else f"本次处理 {attempted} 个详情"},
+            {"name": "下载入库", "status": stage_status if stage_status == "attention" else "done", "value": event_counter(latest_event, "downloadedVideos"), "note": f"目标目录：{STAGING.name}"},
+        ]
+    else:
+        stages = [
+            {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},
+            {"name": "去重", "status": "active" if is_crawling else ("done" if unique_videos else "waiting"), "value": unique_videos, "note": f"移除 {duplicates} 个重复"},
+            {"name": "媒体解析", "status": "active" if is_crawling else ("done" if handled_resolve_count == unique_videos and unique_videos else "attention"), "value": resolved_count, "note": f"已解析 {resolved_count}，安全拦截 {blocked_count}" if blocked_count else f"共 {unique_videos} 个唯一视频"},
+            {"name": "下载入库", "status": "done" if handled_download_count == unique_videos and unique_videos else "active" if is_crawling else "attention" if partials else "waiting", "value": downloaded_count, "note": f"目标目录：{STAGING.name}"},
+        ]
 
     payload = {
         "generatedAt": now.isoformat(timespec="seconds"),
@@ -420,6 +535,7 @@ def main() -> int:
             "resolvedVideos": resolved_count,
             "downloadedVideos": downloaded_count,
             "blockedVideos": blocked_count,
+            "ignoredVideos": len(ignored_keys),
             "pendingVideos": pending_count,
             "repairableVideos": pending_count,
             "partialDownloads": len(partials),
@@ -431,7 +547,10 @@ def main() -> int:
             "todayIngestedBytes": sum(int(item.get("bytes") or 0) for item in today_history),
             "ingestedFiles": len(download_history),
             "ingestedBytes": ingested_bytes,
-            "downloadRate": round((downloaded_count / unique_videos * 100), 1) if unique_videos else 0,
+            "downloadRate": round(
+                (downloaded_count / max(1, unique_videos - len(ignored_keys)) * 100),
+                1,
+            ) if unique_videos else 0,
         },
         "storage": {
             "usedBytes": total_bytes,
@@ -467,32 +586,31 @@ def main() -> int:
                 "startedAt": latest_event.get("startedAt") if latest_event else None,
                 "finishedAt": latest_event.get("timestamp") if latest_event else None,
                 "durationSeconds": latest_event.get("durationSeconds") if latest_event else None,
-                "rawLinks": int((latest_event or {}).get("rawLinks") or raw_links),
-                "uniqueVideos": latest_event_unique,
-                "skippedVideos": int((latest_event or {}).get("skippedVideos") or metadata.get("known_videos_skipped") or 0),
-                "newVideos": int((latest_event or {}).get("newVideos") or 0),
-                "retryVideos": int((latest_event or {}).get("retryVideos") or 0),
-                "downloadedVideos": int((latest_event or {}).get("downloadedVideos") or 0),
-                "duplicateVideos": int((latest_event or {}).get("duplicateVideos") or 0),
+                "rawLinks": latest_result_raw_links,
+                "uniqueVideos": latest_result_unique,
+                "skippedVideos": latest_result_skipped,
+                "newVideos": event_counter(latest_event, "newVideos"),
+                "retryVideos": event_counter(latest_event, "retryVideos"),
+                "downloadedVideos": event_counter(latest_event, "downloadedVideos"),
+                "duplicateVideos": event_counter(latest_event, "duplicateVideos"),
                 "blockedVideos": int(
                     latest_event.get("blockedVideos")
                     if latest_event and "blockedVideos" in latest_event
                     else blocked_count
                 ),
-                "failedVideos": int((latest_event or {}).get("failedVideos") or 0),
-                "downloadedBytes": int((latest_event or {}).get("downloadedBytes") or 0),
+                "ignoredVideos": latest_result_ignored,
+                "failedVideos": event_counter(latest_event, "failedVideos"),
+                "downloadedBytes": event_counter(latest_event, "downloadedBytes"),
+                "autoRetryAttempts": event_counter(latest_event, "autoRetryAttempts"),
+                "autoRetriedVideos": event_counter(latest_event, "autoRetriedVideos"),
+                "autoRecoveredVideos": event_counter(latest_event, "autoRecoveredVideos"),
                 "listingFailures": int(
                     latest_event.get("listingFailures")
                     if latest_event and "listingFailures" in latest_event
                     else listing_failure_count if latest_event_type == "crawl" else 0
                 ),
             },
-            "stages": [
-                {"name": "列表抓取", "status": "active" if is_crawling else ("done" if raw_links else "waiting"), "value": raw_links, "note": "原始详情链接"},
-                {"name": "去重", "status": "active" if is_crawling else ("done" if unique_videos else "waiting"), "value": unique_videos, "note": f"移除 {duplicates} 个重复"},
-                {"name": "媒体解析", "status": "active" if is_crawling else ("done" if handled_resolve_count == unique_videos and unique_videos else "attention"), "value": resolved_count, "note": f"已解析 {resolved_count}，安全拦截 {blocked_count}" if blocked_count else f"共 {unique_videos} 个唯一视频"},
-                {"name": "下载入库", "status": "done" if handled_download_count == unique_videos and unique_videos else "active" if is_crawling else "attention" if partials else "waiting", "value": downloaded_count, "note": f"目标目录：{STAGING.name}"},
-            ],
+            "stages": stages,
         },
         "alerts": alerts,
         "recentFiles": recent,

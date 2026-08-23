@@ -29,7 +29,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(status.overview.uniqueVideos >= 0, true);
   assert.equal(status.overview.resolvedVideos <= status.overview.uniqueVideos, true);
   assert.equal(status.overview.downloadedVideos <= status.overview.uniqueVideos, true);
-  assert.equal(status.overview.pendingVideos, status.overview.uniqueVideos - status.overview.downloadedVideos - status.overview.blockedVideos);
+  assert.equal(status.overview.pendingVideos, status.overview.uniqueVideos - status.overview.downloadedVideos - status.overview.blockedVideos - status.overview.ignoredVideos);
   assert.equal(status.overview.repairableVideos, status.overview.pendingVideos);
   assert.equal(status.overview.rawLinks - status.overview.uniqueVideos, status.overview.duplicatesRemoved);
   assert.equal(status.daily.length, 14);
@@ -44,7 +44,7 @@ test("monitor snapshot is real, local, and internally consistent", async () => {
   assert.equal(Object.hasOwn(status.latestRun, "lastRepairAt"), true);
   assert.equal(status.alerts.some((alert) => alert.title === "历史记录与文件不一致"), false);
   assert.equal(status.latestRun.result.rawLinks >= status.latestRun.result.uniqueVideos, true);
-  if (status.latestRun.result.taskType === "crawl") {
+  if (status.latestRun.result.taskType === "crawl" && status.latestRun.result.status !== "failed") {
     assert.equal(status.latestRun.result.uniqueVideos, status.overview.uniqueVideos);
   }
   assert.equal(Number.isInteger(status.latestRun.result.listingFailures), true);
@@ -76,7 +76,7 @@ test("dashboard keeps a single focused monitor and the shared favicon", async ()
   assert.doesNotMatch(source, /className="panel run-panel"/);
   assert.match(source, /!taskAppearsActive && <>/);
   assert.match(source, /再次抓取最新内容/);
-  assert.match(source, /修复 \$\{data\.overview\.repairableVideos\} 个失败项/);
+  assert.match(source, /复核 \$\{data\.overview\.repairableVideos\} 个待处理项/);
   assert.match(source, /\/api\/task\/repair/);
   assert.match(source, /未重新抓取榜单/);
   assert.doesNotMatch(source, /处理 \$\{data\.overview\.pendingVideos\} 个待办/);
@@ -120,9 +120,12 @@ test("dashboard uses realtime events with a polling fallback", async () => {
   assert.match(source, /错误媒体复核完成/);
   assert.match(source, /部分榜单页面抓取失败/);
   assert.match(source, /永久跳过/);
+  assert.match(source, /自动恢复/);
   assert.match(source, /taskLaunching/);
   assert.match(source, /正在准备抓取任务/);
   assert.match(source, /currentProgress/);
+  assert.match(source, /stage === "listing"/);
+  assert.match(source, /列表进度/);
   assert.doesNotMatch(source, /lastProgress/);
   assert.match(source, /CURRENT TASK/);
   assert.doesNotMatch(source, /LAST TASK/);
@@ -156,4 +159,40 @@ test("crawl sources can be managed safely from the dashboard", async () => {
   const compose = await readFile(new URL("../compose.yaml", import.meta.url), "utf8");
   assert.match(compose, /\.\/config:\/app\/config\s/);
   assert.doesNotMatch(compose, /\.\/config:\/app\/config:ro/);
+});
+
+test("authentication Cookie can be validated and replaced from the local dashboard", async () => {
+  const source = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(source, /登录 Cookie 任务栏/);
+  assert.match(source, /Cookie 可用/);
+  assert.match(source, /Cookie 已配置/);
+  assert.match(source, /Cookie 需更新/);
+  assert.match(source, /fetch\("\/api\/auth-cookie"/);
+  assert.match(source, /window\.navigator\.userAgent/);
+  assert.match(source, /下一次人工抓取/);
+  assert.match(source, /上次抓取被拦截/);
+  assert.match(source, /previousTaskStatusRef\.current === "active"/);
+  assert.match(source, /setAuthCookieValue\(""\)/);
+  assert.match(source, /setTimeout\(\(\) => \{\s*setAuthCookieFeedback\(""\)/);
+  assert.doesNotMatch(source, /value=\{authCookie\?\./);
+
+  const styles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(styles, /\.cookie-manager\s*\{/);
+  assert.match(styles, /\.cookie-control-grid\s*\{/);
+  assert.match(styles, /\.cookie-health\s*\{/);
+  assert.match(styles, /\.cookie-feedback-transient\s*\{/);
+  assert.doesNotMatch(styles, /\.quiet-meta\s*\{/);
+
+  const taskService = await readFile(new URL("../scripts/start-local.py", import.meta.url), "utf8");
+  assert.match(taskService, /\/api\/auth-cookie/);
+  assert.match(taskService, /replace_auth_profile/);
+  assert.match(taskService, /任务运行中，请在任务结束后更新 Cookie/);
+  assert.match(taskService, /expected_origin/);
+  assert.match(taskService, /def do_OPTIONS[\s\S]*send_response\(204\)/);
+  assert.match(taskService, /Access-Control-Allow-Headers', 'Content-Type'/);
+  assert.match(taskService, /send_header\("Content-Length", "0"\)/);
+
+  const viteConfig = await readFile(new URL("../vite.config.ts", import.meta.url), "utf8");
+  assert.match(viteConfig, /x-forwarded-host/);
+  assert.match(viteConfig, /x-forwarded-proto/);
 });

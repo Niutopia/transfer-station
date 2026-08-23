@@ -5,6 +5,8 @@ import { useCallback, useEffect, useMemo, useState, useRef, type FormEvent } fro
 type ProgressData = {
   stage: string;
   mode?: "crawl" | "repair";
+  route?: "direct" | "http-proxy" | null;
+  routeProbe?: Record<string, unknown>;
   done: number;
   total: number;
   active?: Array<{
@@ -42,6 +44,7 @@ type MonitorData = {
     resolvedVideos: number;
     downloadedVideos: number;
     blockedVideos: number;
+    ignoredVideos: number;
     pendingVideos: number;
     repairableVideos: number;
     partialDownloads: number;
@@ -81,12 +84,16 @@ type MonitorData = {
       downloadedVideos: number;
       duplicateVideos: number;
       blockedVideos: number;
+      ignoredVideos: number;
       failedVideos: number;
       downloadedBytes: number;
       listingFailures: number;
+      autoRetryAttempts?: number;
+      autoRetriedVideos?: number;
+      autoRecoveredVideos?: number;
     };
   };
-  alerts: Array<{ level: "success" | "warning" | "error"; title: string; detail: string }>;
+  alerts: Array<{ level: "success" | "info" | "warning" | "error"; scope?: "task" | "backlog"; title: string; detail: string }>;
   activeDownloads: Array<{
     name: string;
     fileName: string;
@@ -104,6 +111,16 @@ type MonitorData = {
   }>;
   progress?: ProgressData | null;
   currentProgress?: ProgressData | null;
+};
+
+type AuthCookieStatus = {
+  configured: boolean;
+  valid: boolean | null;
+  hasClearance: boolean;
+  cookieCount: number;
+  updatedAt: string | null;
+  browser: string | null;
+  error: string | null;
 };
 
 const nf = new Intl.NumberFormat("zh-CN");
@@ -153,8 +170,10 @@ function downloadStateLabel(state: MonitorData["activeDownloads"][number]["statu
 }
 
 function progressTitle(stage: string) {
-  if (stage === "crawling") return "正在抓取榜单页面";
+  // The crawler reports the initial listing scan as `listing`.
+  if (stage === "listing" || stage === "crawling") return "正在抓取榜单页面";
   if (stage === "resolving") return "正在解析媒体地址";
+  if (stage === "route-probe") return "正在测试下载路线";
   if (stage === "finalizing") return "正在整理任务结果";
   if (stage === "complete") return "下载任务已完成";
   if (stage === "failed") return "任务需要处理";
@@ -179,9 +198,17 @@ export default function Home() {
   const [sourceDeleting, setSourceDeleting] = useState("");
   const [sourceFeedback, setSourceFeedback] = useState("");
   const [sourceError, setSourceError] = useState("");
+  const [authCookie, setAuthCookie] = useState<AuthCookieStatus | null>(null);
+  const [authCookieValue, setAuthCookieValue] = useState("");
+  const [authCookieChecking, setAuthCookieChecking] = useState(false);
+  const [authCookieSaving, setAuthCookieSaving] = useState(false);
+  const [authCookieFeedback, setAuthCookieFeedback] = useState("");
+  const [authCookieError, setAuthCookieError] = useState("");
   const abortControllerRef = useRef<AbortController | null>(null);
+  const authCookieFeedbackTimerRef = useRef<number | null>(null);
   const realtimeEverConnectedRef = useRef(false);
   const reloadAfterReconnectRef = useRef(false);
+  const previousTaskStatusRef = useRef<MonitorData["latestRun"]["status"] | null>(null);
 
   const load = useCallback(async () => {
     setRefreshing(true);
@@ -242,6 +269,20 @@ export default function Home() {
     }
   }, []);
 
+  const loadAuthCookie = useCallback(async () => {
+    setAuthCookieChecking(true);
+    try {
+      const response = await fetch(`/api/auth-cookie?t=${Date.now()}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => ({})) as { cookie?: AuthCookieStatus; error?: string };
+      if (!response.ok || !payload.cookie) throw new Error(payload.error || "Cookie 状态读取失败");
+      setAuthCookie(payload.cookie);
+    } catch (err) {
+      setAuthCookie((current) => current ? { ...current, valid: null, error: err instanceof Error ? err.message : "Cookie 状态读取失败" } : null);
+    } finally {
+      setAuthCookieChecking(false);
+    }
+  }, []);
+
   const startTask = useCallback(async (mode: "crawl" | "repair") => {
     setStartingTask(mode);
     setTaskLaunching(true);
@@ -265,17 +306,18 @@ export default function Home() {
       }
       if (!response.ok) throw new Error(payload.error || '无法启动任务');
       setServiceOnline(true);
-      setTaskMessage(mode === "repair" ? "失败项修复已启动，不会重新抓取榜单" : "抓取任务已启动，状态会自动更新");
+      setTaskMessage(mode === "repair" ? "待处理项复核已启动，不会重新抓取榜单" : "抓取任务已启动，状态会自动更新");
       window.setTimeout(() => void load(), 120);
       window.setTimeout(() => setTaskLaunching(false), 8_000);
-    } catch {
-      setServiceOnline(false);
+    } catch (err) {
+      if (err instanceof TypeError) setServiceOnline(false);
+      else void loadServiceHealth();
       setTaskLaunching(false);
-      setTaskError("任务服务未连接。历史状态仍可查看，但暂时不能启动新任务。");
+      setTaskError(err instanceof Error ? err.message : "无法启动任务");
     } finally {
       setStartingTask(null);
     }
-  }, [load]);
+  }, [load, loadServiceHealth]);
 
   const applySources = useCallback((sources: Array<{ name: string; url: string }>) => {
     setData((current) => current ? {
@@ -338,22 +380,61 @@ export default function Home() {
     }
   }, [applySources, load]);
 
+  const updateAuthCookie = useCallback(async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAuthCookieSaving(true);
+    setAuthCookieFeedback("");
+    setAuthCookieError("");
+    try {
+      const response = await fetch("/api/auth-cookie", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookie: authCookieValue, userAgent: window.navigator.userAgent }),
+      });
+      const payload = await response.json().catch(() => ({})) as { cookie?: AuthCookieStatus; error?: string };
+      if (!response.ok || !payload.cookie) throw new Error(payload.error || "Cookie 更新失败");
+      setAuthCookie(payload.cookie);
+      setAuthCookieFeedback("已保存；下一次人工抓取将确认 Cookie 状态");
+      if (authCookieFeedbackTimerRef.current !== null) window.clearTimeout(authCookieFeedbackTimerRef.current);
+      authCookieFeedbackTimerRef.current = window.setTimeout(() => {
+        setAuthCookieFeedback("");
+        authCookieFeedbackTimerRef.current = null;
+      }, 4000);
+    } catch (err) {
+      setAuthCookieError(err instanceof Error ? err.message : "Cookie 更新失败，现有凭证未改变");
+    } finally {
+      // Never retain a pasted credential in React state after a validation attempt.
+      setAuthCookieValue("");
+      setAuthCookieSaving(false);
+    }
+  }, [authCookieValue]);
+
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       void load();
       void loadServiceHealth();
+      void loadAuthCookie();
     });
     return () => {
       window.cancelAnimationFrame(frame);
+      if (authCookieFeedbackTimerRef.current !== null) window.clearTimeout(authCookieFeedbackTimerRef.current);
       abortControllerRef.current?.abort();
     };
-  }, [load, loadServiceHealth]);
+  }, [load, loadAuthCookie, loadServiceHealth]);
 
   useEffect(() => {
     if (!sourceFeedback) return;
     const timer = window.setTimeout(() => setSourceFeedback(""), 3_500);
     return () => window.clearTimeout(timer);
   }, [sourceFeedback]);
+
+  useEffect(() => {
+    const nextStatus = data?.latestRun.status ?? null;
+    if (previousTaskStatusRef.current === "active" && nextStatus && nextStatus !== "active") {
+      void loadAuthCookie();
+    }
+    previousTaskStatusRef.current = nextStatus;
+  }, [data?.latestRun.status, loadAuthCookie]);
 
   useEffect(() => {
     if (!autoRefresh) return;
@@ -422,6 +503,7 @@ export default function Home() {
   const taskAppearsActive = isCrawling || taskLaunching;
   const completedToday = data.latestRun.completedToday === true;
   const currentProgress = data.currentProgress ?? (isCrawling ? data.progress : null);
+  const listingInProgress = isCrawling && (currentProgress?.stage === "listing" || currentProgress?.stage === "crawling");
   const currentPercent = currentProgress?.total ? Math.min(100, currentProgress.done / currentProgress.total * 100) : 0;
   const aggregateSpeed = data.activeDownloads.reduce((total, item) => total + (item.speedBytesS ?? 0), 0);
   const currentKnownBytePercent = currentProgress?.bytesTotalKnown ? Math.min(100, (currentProgress.bytesDone ?? 0) / currentProgress.bytesTotalKnown * 100) : 0;
@@ -436,6 +518,15 @@ export default function Home() {
     && taskResult.downloadedVideos === 0
     && taskResult.failedVideos === 0
   );
+  const cookieHealthClass = authCookie?.valid === true ? "online" : authCookie?.valid === false ? "offline" : "checking";
+  const cookieHealthLabel = authCookieChecking ? "Cookie 状态读取中" : authCookie?.valid === true ? "Cookie 可用" : authCookie?.valid === false ? "Cookie 需更新" : authCookie?.configured ? "Cookie 已配置" : "Cookie 待配置";
+  const cookieStatusDetail = authCookieChecking
+    ? "正在读取最近一次手动抓取结果"
+    : authCookie?.valid === true
+      ? `最近一次手动抓取成功 · Cookie 更新于 ${clock(authCookie.updatedAt)}`
+      : authCookie?.valid === false
+        ? authCookie.error || "凭据不可用，请更新后再开始任务"
+        : "已配置 · 完成人工抓取后确认状态";
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -450,15 +541,30 @@ export default function Home() {
             {serviceOnline === false ? "任务离线" : serviceOnline === true ? "任务在线" : "检查服务"}
           </div>
           <button
-            className={`live-button ${autoRefresh ? "active" : ""}`}
+            className={`service-health cookie-health ${cookieHealthClass}`}
+            type="button"
+            onClick={() => {
+              const manager = document.getElementById("auth-cookie-manager") as HTMLDetailsElement | null;
+              if (manager) {
+                manager.open = true;
+                manager.scrollIntoView({ behavior: "smooth", block: "center" });
+              }
+            }}
+            aria-label={`${cookieHealthLabel}，前往 Cookie 任务栏`}
+          >
+            <span aria-hidden="true" />
+            {cookieHealthLabel}
+          </button>
+          <button
+            className={`live-button ${autoRefresh ? realtimeConnected ? "active" : "checking" : ""}`}
             type="button"
             aria-pressed={autoRefresh}
             onClick={() => setAutoRefresh((value) => !value)}
           >
             <span className="live-dot" aria-hidden="true" />
-            {autoRefresh ? realtimeConnected ? "实时更新中" : "正在重新连接" : "实时更新已暂停"}
+            {autoRefresh ? realtimeConnected ? "实时更新中" : "实时连接中" : "实时更新已暂停"}
           </button>
-          <button className="icon-button" type="button" aria-label="刷新监控数据" onClick={() => void load()} disabled={refreshing}>
+          <button className="icon-button" type="button" aria-label="刷新监控数据" onClick={() => { void load(); void loadAuthCookie(); }} disabled={refreshing || authCookieChecking}>
             {refreshing ? "…" : "↻"}
           </button>
         </div>
@@ -485,8 +591,9 @@ export default function Home() {
                     type="button"
                     onClick={() => void startTask("repair")}
                     disabled={startingTask !== null || serviceOnline === false}
+                    title="仅复核现有待处理项，串行低频访问详情页，不重新抓取榜单"
                   >
-                    {serviceOnline === false ? "任务服务离线" : startingTask === "repair" ? "正在启动修复…" : `修复 ${data.overview.repairableVideos} 个失败项`}
+                    {serviceOnline === false ? "任务服务离线" : startingTask === "repair" ? "正在启动复核…" : `复核 ${data.overview.repairableVideos} 个待处理项`}
                   </button>}
                   <button
                     className="secondary highlight-btn"
@@ -500,13 +607,14 @@ export default function Home() {
               </div>
             </div>
             <div className="current-task-grid">
-              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "任务准备" : !isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
-              <span><small>{repairing ? "修复范围" : "抓取范围"}</small><strong>{repairing ? `${data.overview.repairableVideos} 个失败项` : `${data.source.listingCount} 榜 × ${data.source.pagesPerListing} 页`}</strong></span>
-              <span><small>处理进度</small><strong>{taskLaunching && !isCrawling ? "正在连接" : isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}` : "准备中" : data.overview.repairableVideos > 0 ? `${data.overview.repairableVideos} 个可修复` : "暂无任务"}</strong></span>
+              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "任务准备" : !isCrawling || !currentProgress ? "等待启动" : currentProgress.stage === "downloading" ? "下载入库" : currentProgress.stage === "route-probe" ? "路线测速" : currentProgress.stage === "resolving" ? "媒体解析" : currentProgress.stage === "finalizing" ? "结果整理" : "榜单抓取"}</strong></span>
+              <span><small>{repairing ? "复核范围" : "抓取范围"}</small><strong>{repairing ? `${data.overview.repairableVideos} 个待处理项` : `${data.source.listingCount} 榜 × ${data.source.pagesPerListing} 页`}</strong></span>
+              <span><small>{taskAppearsActive ? listingInProgress ? "列表进度" : "处理进度" : "历史待处理"}</small><strong>{taskLaunching && !isCrawling ? "正在连接" : isCrawling && currentProgress ? currentProgress.total > 0 ? `${currentProgress.done}/${currentProgress.total}${listingInProgress ? " 页" : ""}` : "准备中" : data.overview.repairableVideos > 0 ? `${data.overview.repairableVideos} 个待复核` : "暂无任务"}</strong></span>
               <span><small>{taskAppearsActive ? "启动时间" : "最近抓取"}</small><strong>{taskLaunching && !isCrawling ? "刚刚" : isCrawling && currentProgress ? clock(currentProgress.startedAt ?? data.latestRun.startedAt) : clock(data.latestRun.lastCrawlAt ?? data.latestRun.completedAt ?? data.source.latestCrawlAt ?? null)}</strong></span>
             </div>
             {taskAppearsActive && <div className={`current-task-track ${(taskLaunching || currentProgress?.total === 0) ? "indeterminate" : ""}`} role={isCrawling && (currentProgress?.total ?? 0) > 0 ? "progressbar" : undefined} aria-valuenow={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.done : undefined} aria-valuemin={isCrawling && (currentProgress?.total ?? 0) > 0 ? 0 : undefined} aria-valuemax={isCrawling && (currentProgress?.total ?? 0) > 0 ? currentProgress?.total : undefined}><i style={isCrawling && (currentProgress?.total ?? 0) > 0 ? { width: `${currentPercent}%` } : undefined} /></div>}
-            {isCrawling && currentProgress?.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}
+            {isCrawling && currentProgress?.stage === "route-probe" && <div className="current-task-meta"><span>正在比较直连与 HTTP 代理</span><span>完成后自动选择更快路线</span></div>}
+            {isCrawling && currentProgress?.stage === "downloading" && <div className="current-task-meta"><span>活动下载 {data.activeDownloads.length}</span><span>路线 {currentProgress.route === "http-proxy" ? "HTTP 代理" : "直连"}</span><span>实时速度 {formatBytes(currentProgress.speedBytesS ?? aggregateSpeed)}/s</span><span>预计剩余 {formatDuration(currentProgress.etaSeconds)}</span></div>}
             {isCrawling && currentProgress && (currentProgress.bytesTotalKnown ?? 0) > 0 && <>
               <div className="current-byte-caption"><span>已知字节进度 · {currentProgress.knownItems ?? 0} 个文件</span><strong>{formatBytes(currentProgress.bytesDone ?? 0)} / {formatBytes(currentProgress.bytesTotalKnown ?? 0)}</strong></div>
               <div className="current-task-track byte-track" role="progressbar" aria-label="当前任务已知字节进度" aria-valuenow={currentKnownBytePercent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${currentKnownBytePercent}%` }} /></div>
@@ -543,16 +651,57 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="source-manager" aria-labelledby="source-manager-title">
-            <div className="source-manager-head">
+          <details id="auth-cookie-manager" className={`cookie-manager settings-panel ${authCookie?.valid === false ? "needs-attention" : ""}`} aria-label="登录 Cookie 任务栏">
+            <summary className="settings-summary">
               <div>
-                <span className="source-manager-kicker"><i />CRAWL SOURCES</span>
-                <h2 id="source-manager-title">抓取链接任务栏</h2>
-                <p>管理下一次手动任务要检查的榜单链接，每个链接抓取前 {data.source.pagesPerListing} 页。</p>
+                <h2 id="auth-cookie-title">登录 Cookie</h2>
+                <p>{cookieStatusDetail}</p>
+              </div>
+              <span className={`status ${authCookieChecking ? "active" : authCookie?.valid === true ? "done" : authCookie?.valid === false ? "attention" : "waiting"}`}>{authCookieChecking ? "读取中" : authCookie?.valid === true ? "可用" : authCookie?.valid === false ? "需更新" : "已配置"}</span>
+            </summary>
+            <div className="cookie-control-grid">
+              <div className={`cookie-status-panel ${authCookie?.valid === false ? "invalid" : authCookie?.valid === true ? "valid" : "unknown"}`} aria-live="polite">
+                <div className="cookie-status-title"><span aria-hidden="true" /><div><small>当前状态</small><strong>{authCookieChecking ? "正在读取" : authCookie?.valid === true ? "上次抓取成功" : authCookie?.valid === false ? "上次抓取被拦截" : "等待人工抓取确认"}</strong></div></div>
+                <p>{authCookie?.valid === true ? "最近一次人工抓取成功，无需更新。" : authCookie?.valid === false ? "最近一次人工抓取确认被 Cloudflare 拦截，请更新 Cookie。" : "系统不会单独检测；状态以人工抓取结果为准。"}</p>
+                <button className="cookie-check" type="button" onClick={() => void loadAuthCookie()} disabled={authCookieChecking || authCookieSaving}>{authCookieChecking ? "正在读取…" : "刷新状态"}</button>
+              </div>
+              <form className="cookie-form" onSubmit={updateAuthCookie} autoComplete="off" title="保存后由下一次人工抓取确认状态">
+                <label>
+                  <span>新 Cookie</span>
+                  <textarea
+                    value={authCookieValue}
+                    onChange={(event) => { setAuthCookieValue(event.target.value); setAuthCookieFeedback(""); setAuthCookieError(""); }}
+                    rows={6}
+                    maxLength={65536}
+                    required
+                    autoComplete="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    placeholder="name=value; name2=value2"
+                    disabled={taskAppearsActive || authCookieSaving}
+                  />
+                </label>
+                <div className="cookie-form-footer">
+                  <div aria-live="polite">
+                    {authCookieFeedback && <p className="source-feedback success cookie-feedback-transient" role="status">{authCookieFeedback}</p>}
+                    {authCookieError && <p className="source-feedback error" role="alert">{authCookieError}</p>}
+                    {!authCookieFeedback && !authCookieError && <p>仅保存在本机；下一次人工抓取会确认是否可用。</p>}
+                  </div>
+                  <button className="cookie-submit" type="submit" disabled={taskAppearsActive || authCookieSaving || !authCookieValue.trim()}>{taskAppearsActive ? "任务中·已锁定" : authCookieSaving ? "正在保存…" : "保存 Cookie"}</button>
+                </div>
+              </form>
+            </div>
+          </details>
+
+          <details className="source-manager settings-panel" aria-label="抓取链接任务栏">
+            <summary className="settings-summary">
+              <div>
+                <h2 id="source-manager-title">抓取链接</h2>
+                <p>{data.source.sources?.length ?? 0} 个来源 · 每个抓取前 {data.source.pagesPerListing} 页</p>
               </div>
               <span className={`status ${taskAppearsActive ? "active" : (data.source.sources?.length ?? 0) === 0 ? "waiting" : "done"}`}>{taskAppearsActive ? "任务中·已锁定" : `${data.source.sources?.length ?? 0} 个链接`}</span>
-            </div>
-            <form className="source-form" onSubmit={addCrawlSource}>
+            </summary>
+            <div className="settings-body"><form className="source-form" onSubmit={addCrawlSource}>
               <label>
                 <span>名称（可选）</span>
                 <input value={sourceName} onChange={(event) => { setSourceName(event.target.value); setSourceFeedback(""); setSourceError(""); }} maxLength={40} placeholder="例如：最近热门" disabled={taskAppearsActive || sourceSaving} />
@@ -579,9 +728,10 @@ export default function Home() {
                 >{sourceDeleting === source.url ? "删除中…" : "删除"}</button>
               </article>)}
             </div>
-          </section>
+            </div>
+          </details>
 
-          <div className="footer-note"><span>{autoRefresh && realtimeConnected ? "实时连接已建立" : autoRefresh ? "实时连接中断，已降级为 10 秒轮询" : "实时更新已暂停"}</span><span>快照生成于 {clock(data.generatedAt)}</span></div>
+          <div className="footer-note"><span>{autoRefresh && realtimeConnected ? "实时连接已建立" : autoRefresh ? "实时连接未建立，已降级为 10 秒轮询" : "实时更新已暂停"}</span><span>快照生成于 {clock(data.generatedAt)}</span></div>
         </section>
 
         <aside className="side-column" aria-label="运行状态">
@@ -590,10 +740,10 @@ export default function Home() {
               <h2 id="task-result-title">本次任务结果</h2>
               <span className={`status ${taskAppearsActive ? "active" : taskResult?.status === "failed" || taskResult?.status === "attention" ? "attention" : "done"}`}>{taskAppearsActive ? "进行中" : taskResult?.status === "failed" ? "失败" : taskResult?.status === "attention" ? "部分完成" : taskResult?.status === "success" ? "已完成" : "暂无"}</span>
             </div>
-            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? resultIsBlockedReview ? "错误媒体复核完成" : resultIsRepair ? "可恢复失败项处理完成" : taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "attention" ? "部分榜单页面抓取失败" : taskResult?.status === "failed" ? resultIsRepair ? "部分可恢复失败项仍需处理" : "任务未能完整完成" : "尚未运行任务"}</strong>
+            <strong className="task-result-summary">{taskLaunching && !isCrawling ? "正在连接任务服务" : isCrawling ? progressTitle(currentProgress?.stage ?? "crawling") : taskResult?.status === "success" ? resultIsBlockedReview ? "错误媒体复核完成" : resultIsRepair ? "待处理项复核完成" : taskResult.newVideos || taskResult.retryVideos ? "采集与下载处理完成" : "检查完成，暂无新内容" : taskResult?.status === "attention" ? "部分榜单页面抓取失败" : taskResult?.status === "failed" ? resultIsRepair ? "部分待处理项仍待复核" : "任务未能完整完成" : "尚未运行任务"}</strong>
             {taskAppearsActive ? <div className="task-result-grid">
-              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "准备中" : currentProgress?.stage === "downloading" ? "下载入库" : currentProgress?.stage === "resolving" ? "媒体解析" : repairing ? "修复准备" : "榜单抓取"}</strong></span>
-              <span><small>处理进度</small><strong>{currentProgress?.total ? `${currentProgress.done}/${currentProgress.total}` : "计算中"}</strong></span>
+              <span><small>当前阶段</small><strong>{taskLaunching && !isCrawling ? "准备中" : currentProgress?.stage === "downloading" ? "下载入库" : currentProgress?.stage === "route-probe" ? "路线测速" : currentProgress?.stage === "resolving" ? "媒体解析" : repairing ? "修复准备" : "榜单抓取"}</strong></span>
+              <span><small>{listingInProgress ? "列表进度" : "处理进度"}</small><strong>{currentProgress?.total ? `${currentProgress.done}/${currentProgress.total}${listingInProgress ? " 页" : ""}` : "计算中"}</strong></span>
               <span><small>活动下载</small><strong>{data.activeDownloads.length}</strong></span>
               <span><small>实时速度</small><strong>{formatBytes(currentProgress?.speedBytesS ?? aggregateSpeed)}/s</strong></span>
             </div> : taskResult && taskResult.status !== "none" ? <>
@@ -601,9 +751,9 @@ export default function Home() {
                 <span><small>{resultIsRepair ? "复核项目" : "检查链接"}</small><strong>{nf.format(resultIsRepair ? taskResult.retryVideos : taskResult.rawLinks)}</strong></span>
                 <span><small>{resultIsRepair ? "已恢复" : "新发现"}</small><strong>{nf.format(resultIsRepair ? taskResult.downloadedVideos : taskResult.newVideos)}</strong></span>
                 <span><small>本次入库</small><strong>{nf.format(taskResult.downloadedVideos)}</strong></span>
-                <span><small>{taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
+                <span><small>{resultIsRepair ? taskResult.failedVideos ? "仍未完成" : taskResult.blockedVideos ? "安全跳过" : "复核项" : taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
               </div>
-              <p className="task-result-detail">{resultIsRepair ? `仅复核现有快照中的 ${nf.format(taskResult.retryVideos)} 个可恢复项目，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.listingFailures ? `，${nf.format(taskResult.listingFailures)} 个榜单页面未成功读取` : ""}{taskResult.blockedVideos ? `，确认并永久跳过 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
+              <p className="task-result-detail">{resultIsRepair ? `仅复核现有快照中的 ${nf.format(taskResult.retryVideos)} 个待处理项目，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.listingFailures ? `，${nf.format(taskResult.listingFailures)} 个榜单页面未成功读取` : ""}{taskResult.blockedVideos ? `，确认并永久跳过 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.autoRecoveredVideos ? `，自动恢复 ${nf.format(taskResult.autoRecoveredVideos)} 个下载` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
               <div className="task-result-time"><span>完成于 {clock(taskResult.finishedAt ?? null)}</span><span>{taskResult.durationSeconds ? `耗时 ${formatDuration(taskResult.durationSeconds)}` : "耗时未记录"}</span></div>
             </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
             {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}

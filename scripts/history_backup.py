@@ -22,6 +22,7 @@ BACKUP_FILES = (
     Path("data/download-content-history.json"),
     Path("data/download-history.json"),
     Path("data/download-success.txt"),
+    Path("data/ignored-media.json"),
     Path("data/run-history.jsonl"),
     Path("data/video-history.json"),
 )

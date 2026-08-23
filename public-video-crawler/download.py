@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,14 @@ SYNC_INTERVAL = 64 * 1024 * 1024
 EXPIRED_STATUS_CODES = {401, 403, 404, 410, 416}
 TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+MEDIA_PROXY_ENV = "MEDIA_HTTP_PROXY"
+DEFAULT_ROUTE_PROBE_BYTES = 2 * 1024 * 1024
+DEFAULT_ROUTE_PROBE_TIMEOUT = 8.0
+MIN_ROUTE_PROBE_BYTES = 64 * 1024
+ROUTE_PROXY_MIN_GAIN = 1.10
+DEFAULT_REFRESH_RETRIES = 3
+MAX_REFRESH_RETRIES = 5
+REFRESH_RETRY_DELAYS = (5.0, 15.0, 45.0, 90.0, 120.0)
 
 _dl_progress_lock = threading.RLock()
 _dl_progress_path: Path | None = None
@@ -44,13 +53,37 @@ _dl_progress_started_at = 0.0
 _dl_progress_stage = "idle"
 _dl_progress_concurrency = 1
 _dl_progress_failed = 0
+_dl_progress_route: str | None = None
+_dl_progress_route_probe: dict[str, object] = {}
+
+
+@dataclass(frozen=True)
+class DownloadRoute:
+    """The transport used for media resolution and media bytes."""
+
+    name: str
+    proxy_url: str | None = None
+
+    @property
+    def force_refresh(self) -> bool:
+        # Signed media URLs can be bound to the egress route.  Refresh every
+        # item when the proxy wins so an old direct URL is never reused.
+        return self.proxy_url is not None
 
 
 class DownloadError(RuntimeError):
     pass
 
 
-class ExpiredMediaError(DownloadError):
+class RefreshableDownloadError(DownloadError):
+    """A failure that may recover after resolving a new signed media URL."""
+
+
+class ExpiredMediaError(RefreshableDownloadError):
+    pass
+
+
+class RefreshableEndpointError(RefreshableDownloadError):
     pass
 
 
@@ -62,6 +95,13 @@ class TransientDownloadError(DownloadError):
     def __init__(self, message: str, retry_after: float = 0.0) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+
+
+class AutoRefreshExhausted(DownloadError):
+    def __init__(self, cause: BaseException, attempts: int) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.attempts = attempts
 
 
 def is_media_mismatch_error(exc: BaseException) -> bool:
@@ -186,6 +226,8 @@ def _progress_snapshot() -> dict[str, object]:
         "total": _dl_progress_total,
         "done": _dl_progress_done,
         "stage": _dl_progress_stage,
+        "route": _dl_progress_route,
+        "routeProbe": _dl_progress_route_probe,
         "active": active,
         "bytesDone": _dl_progress_completed_bytes + active_done,
         "bytesTotalKnown": _dl_progress_completed_bytes + active_total,
@@ -212,7 +254,7 @@ def set_dl_progress_target(path: Path | None, total: int, concurrency: int = 1) 
     global _dl_progress_path, _dl_progress_total, _dl_progress_done
     global _dl_progress_active, _dl_progress_completed_bytes, _dl_progress_started_at
     global _dl_progress_stage, _dl_progress_concurrency
-    global _dl_progress_failed
+    global _dl_progress_failed, _dl_progress_route, _dl_progress_route_probe
     with _dl_progress_lock:
         _dl_progress_path = path
         _dl_progress_total = total
@@ -223,6 +265,23 @@ def set_dl_progress_target(path: Path | None, total: int, concurrency: int = 1) 
         _dl_progress_stage = "downloading"
         _dl_progress_concurrency = max(1, concurrency)
         _dl_progress_failed = 0
+        _dl_progress_route = None
+        _dl_progress_route_probe = {}
+        _persist_dl_progress()
+
+
+def set_dl_progress_stage(stage: str) -> None:
+    global _dl_progress_stage
+    with _dl_progress_lock:
+        _dl_progress_stage = stage
+        _persist_dl_progress()
+
+
+def set_dl_progress_route(route: str | None, probe: dict[str, object] | None = None) -> None:
+    global _dl_progress_route, _dl_progress_route_probe
+    with _dl_progress_lock:
+        _dl_progress_route = route
+        _dl_progress_route_probe = dict(probe or {})
         _persist_dl_progress()
 
 
@@ -274,7 +333,15 @@ def public_https_url(raw: str) -> str:
 
 
 def trusted_proxy_fake_ip(hostname: str, endpoint: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Allow an explicitly trusted hostname to use a local proxy's synthetic Fake-IP."""
+    """Allow an explicitly trusted hostname to use a local proxy's synthetic Fake-IP.
+
+    ``TRUSTED_PROXY_FAKE_IP_HOSTS`` is a comma separated allowlist.  A plain
+    entry matches that single host.  An entry written as ``.rsc.cdn77.org`` (or
+    the Mihomo style ``+.rsc.cdn77.org``) also matches its subdomains, which is
+    what keeps rotating CDN hostnames covered without trusting the whole
+    Fake-IP range.  Suffixes with a single label such as ``.org`` are ignored so
+    a typo cannot widen the allowlist to an entire TLD.
+    """
     if endpoint not in PROXY_FAKE_IP_NETWORK:
         return False
     try:
@@ -282,12 +349,23 @@ def trusted_proxy_fake_ip(hostname: str, endpoint: ipaddress.IPv4Address | ipadd
         return False
     except ValueError:
         pass
-    trusted_hosts = {
-        value.strip().lower().rstrip(".")
-        for value in os.environ.get("TRUSTED_PROXY_FAKE_IP_HOSTS", "").split(",")
-        if value.strip()
-    }
-    return hostname.lower().rstrip(".") in trusted_hosts
+    candidate = hostname.lower().rstrip(".")
+    for value in os.environ.get("TRUSTED_PROXY_FAKE_IP_HOSTS", "").split(","):
+        entry = value.strip().lower().rstrip(".")
+        if not entry:
+            continue
+        if entry.startswith("+."):
+            entry = entry[1:]
+        if entry.startswith("."):
+            suffix = entry.lstrip(".")
+            if "." not in suffix:
+                continue
+            if candidate == suffix or candidate.endswith(f".{suffix}"):
+                return True
+            continue
+        if candidate == entry:
+            return True
+    return False
 
 
 def ensure_public_endpoint(raw: str) -> str:
@@ -301,21 +379,24 @@ def ensure_public_endpoint(raw: str) -> str:
     try:
         results = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
     except socket.gaierror as exc:
-        raise DownloadError("媒体域名解析失败") from exc
+        raise RefreshableEndpointError("媒体域名解析失败") from exc
     addresses = {
         str(sockaddr[0]).split("%", 1)[0]
         for _family, _type, _proto, _canonname, sockaddr in results
         if sockaddr
     }
     if not addresses:
-        raise DownloadError("媒体域名没有可用地址")
+        raise RefreshableEndpointError("媒体域名没有可用地址")
     for address in addresses:
         try:
             endpoint = ipaddress.ip_address(address)
         except ValueError as exc:
             raise DownloadError("媒体域名返回了无效地址") from exc
-        if not endpoint.is_global and not trusted_proxy_fake_ip(parsed.hostname, endpoint):
-            raise DownloadError("拒绝非公网媒体地址")
+        if not endpoint.is_global:
+            if endpoint in PROXY_FAKE_IP_NETWORK and not trusted_proxy_fake_ip(parsed.hostname, endpoint):
+                raise RefreshableEndpointError("拒绝非公网媒体地址")
+            if not trusted_proxy_fake_ip(parsed.hostname, endpoint):
+                raise DownloadError("拒绝非公网媒体地址")
     return raw
 
 
@@ -325,8 +406,44 @@ class SafeRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def build_download_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(SafeRedirect())
+def validate_media_proxy(raw: str | None) -> str | None:
+    """Validate the dedicated media proxy setting.
+
+    The downloader intentionally supports HTTP proxies only.  In particular,
+    accepting ``socks5://`` here would be misleading because the stdlib
+    ``urllib`` handlers do not implement SOCKS.  Credentials and proxy paths
+    are rejected so a local environment variable cannot turn this into an
+    arbitrary proxy URL carrying secrets.
+    """
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise DownloadError("媒体代理端口无效") from exc
+    if parsed.scheme.lower() != "http" or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        raise DownloadError("媒体代理必须是不含凭据的 HTTP URL")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise DownloadError("媒体代理 URL 不应包含路径或查询参数")
+    if port is not None and not 1 <= port <= 65535:
+        raise DownloadError("媒体代理端口无效")
+    # Preserve the caller's host spelling while dropping a cosmetic trailing
+    # slash.  ProxyHandler itself handles the CONNECT details.
+    return value.rstrip("/")
+
+
+def build_download_opener(proxy_url: str | None = None) -> urllib.request.OpenerDirector:
+    """Build a media opener with an explicit proxy policy.
+
+    ``ProxyHandler({})`` is important: otherwise urllib silently consumes
+    HTTP(S)_PROXY from the container/host environment and a so-called direct
+    benchmark may actually use a proxy.
+    """
+    normalized = validate_media_proxy(proxy_url)
+    proxies = {"http": normalized, "https": normalized} if normalized else {}
+    return urllib.request.build_opener(urllib.request.ProxyHandler(proxies), SafeRedirect())
 
 
 def load_items(path: Path) -> list[dict[str, str]]:
@@ -693,7 +810,15 @@ def _resolved_age_seconds(value: str) -> float | None:
         return None
 
 
-def refresh_media(item: dict[str, str], timeout: float, retries: int, progress_callback) -> None:
+def refresh_media(
+    item: dict[str, str],
+    timeout: float,
+    retries: int,
+    progress_callback,
+    *,
+    opener: urllib.request.OpenerDirector | None = None,
+    rate_limiter=None,
+) -> None:
     import crawler
 
     final = Path(f"{item['viewkey']}{extension_for(item['media_url'])}")
@@ -704,18 +829,261 @@ def refresh_media(item: dict[str, str], timeout: float, retries: int, progress_c
         thumbnail_url=item.get("thumbnail_url", ""),
     )
     crawler.resolve_media(
-        crawler.build_opener(),
+        opener or crawler.build_opener(),
         [video],
         timeout=timeout,
         delay=0,
-        user_agent=crawler.DEFAULT_USER_AGENT,
+        user_agent=crawler.configured_user_agent(),
         concurrency=1,
         retries=retries,
+        rate_limiter=rate_limiter,
     )
     if not video.media_url:
         raise DownloadError("重新解析后仍未找到媒体地址")
     item["media_url"] = video.media_url
     item["resolved_at"] = video.resolved_at or _iso_now()
+
+
+def _recovery_routes(selected_route: DownloadRoute, media_proxy: str | None) -> list[DownloadRoute]:
+    routes = [selected_route]
+    if media_proxy:
+        alternate = DownloadRoute("direct") if selected_route.proxy_url else DownloadRoute("http-proxy", media_proxy)
+        if alternate != selected_route:
+            routes.append(alternate)
+    return routes
+
+
+def _refresh_delay(attempt: int) -> float:
+    base = REFRESH_RETRY_DELAYS[min(attempt - 1, len(REFRESH_RETRY_DELAYS) - 1)]
+    return base + random.uniform(0.0, 0.75)
+
+
+def download_with_auto_refresh(
+    item: dict[str, str],
+    *,
+    selected_route: DownloadRoute,
+    media_proxy: str | None,
+    output_dir: Path,
+    partial_dir: Path,
+    timeout: float,
+    max_bytes: int,
+    retries: int,
+    refresh_retries: int,
+    link_max_age: float,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    rate_limiter: RateLimiter | None = None,
+    resolver_limiter: RateLimiter | None = None,
+    content_history: ContentHistory | None = None,
+) -> dict[str, object]:
+    """Download one item, refreshing its signed media URL after recoverable failures."""
+    routes = _recovery_routes(selected_route, media_proxy)
+    route = selected_route
+    opener = build_download_opener(route.proxy_url)
+    resolver_limiter = resolver_limiter or RateLimiter(0)
+    auto_attempts = 0
+    age = _resolved_age_seconds(item.get("resolved_at", ""))
+    refresh_before_download = bool(
+        item.get("canonical_url")
+        and (route.force_refresh or (age is not None and age > link_max_age))
+    )
+
+    while True:
+        try:
+            if refresh_before_download:
+                refresh_media(
+                    item,
+                    timeout,
+                    min(retries, 2),
+                    progress_callback,
+                    opener=build_route_resolver_opener(route),
+                    rate_limiter=resolver_limiter,
+                )
+                refresh_before_download = False
+            result = download_one(
+                opener,
+                item,
+                output_dir,
+                partial_dir,
+                timeout=timeout,
+                max_bytes=max_bytes,
+                retries=retries,
+                progress_callback=progress_callback,
+                rate_limiter=rate_limiter,
+                content_history=content_history,
+            )
+            result = dict(result)
+            if auto_attempts:
+                result["autoRetries"] = auto_attempts
+            return result
+        except (ExpiredMediaError, RefreshableEndpointError) as exc:
+            if auto_attempts >= refresh_retries or not item.get("canonical_url"):
+                raise AutoRefreshExhausted(exc, auto_attempts) from exc
+            auto_attempts += 1
+            delay = _refresh_delay(auto_attempts)
+            # Try the other egress first; a route-bound signed URL often fails
+            # for the same reason on the next request when it is reused.
+            route = routes[auto_attempts % len(routes)]
+            opener = build_download_opener(route.proxy_url)
+            refresh_before_download = True
+            _report(
+                progress_callback,
+                item,
+                output_dir / f"{item['viewkey']}{extension_for(item['media_url'])}",
+                state="refreshing",
+                message=f"自动刷新媒体链接 ({auto_attempts}/{refresh_retries})，{delay:.1f} 秒后重试",
+                retries=refresh_retries,
+            )
+            print(
+                f"[{item['viewkey']}] 媒体地址暂不可用: {exc}; {delay:.1f}s 后自动刷新 ({auto_attempts}/{refresh_retries})",
+                file=sys.stderr,
+            )
+            time.sleep(delay)
+
+
+def probe_media(
+    opener: urllib.request.OpenerDirector,
+    item: dict[str, str],
+    *,
+    timeout: float = DEFAULT_ROUTE_PROBE_TIMEOUT,
+    max_bytes: int = DEFAULT_ROUTE_PROBE_BYTES,
+) -> tuple[float, int]:
+    """Read a bounded Range into nowhere and return ``(bytes/sec, bytes)``.
+
+    This function never touches the output/partial directories.  It is kept
+    separate from ``download_one`` so a route probe cannot accidentally create
+    resumable state or a manifest entry.
+    """
+    if max_bytes < MIN_ROUTE_PROBE_BYTES:
+        raise DownloadError("测速大小太小")
+    ensure_public_endpoint(item["media_url"])
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "video/*,application/octet-stream",
+        "Accept-Encoding": "identity",
+        "Range": f"bytes=0-{max_bytes - 1}",
+    }
+    if item.get("canonical_url"):
+        headers["Referer"] = item["canonical_url"]
+    request = urllib.request.Request(item["media_url"], headers=headers)
+    started = time.monotonic()
+    received = 0
+    try:
+        response = opener.open(request, timeout=max(1.0, timeout))
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        raise DownloadError(f"测速 HTTP {exc.code}") from exc
+    try:
+        with response:
+            status_value = getattr(response, "status", None)
+            status = int(status_value if status_value is not None else response.getcode())
+            if status not in {200, 206}:
+                raise DownloadError(f"测速 HTTP {status}")
+            headers_obj = getattr(response, "headers", None)
+            content_type = ""
+            if headers_obj is not None:
+                try:
+                    content_type = headers_obj.get_content_type()
+                except AttributeError:
+                    content_type = str(headers_obj.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if content_type in {"text/html", "application/json"}:
+                raise DownloadError("测速响应不是媒体")
+            deadline = started + max(1.0, timeout)
+            while received < max_bytes and time.monotonic() < deadline:
+                chunk = response.read(min(256 * 1024, max_bytes - received))
+                if not chunk:
+                    break
+                received += len(chunk)
+    except (TimeoutError, socket.timeout, urllib.error.URLError, OSError) as exc:
+        raise DownloadError("测速超时或连接失败") from exc
+    elapsed = max(0.001, time.monotonic() - started)
+    if received < MIN_ROUTE_PROBE_BYTES:
+        raise DownloadError("测速返回数据不足")
+    return received / elapsed, received
+
+
+def _route_probe_record(speed: float = 0.0, received: int = 0, error: str = "") -> dict[str, object]:
+    record: dict[str, object] = {
+        "ok": bool(speed > 0 and received >= MIN_ROUTE_PROBE_BYTES),
+        "speedBytesS": round(speed, 1),
+        "bytes": received,
+    }
+    if error:
+        record["error"] = error
+    return record
+
+
+def select_download_route(
+    items: list[dict[str, str]],
+    proxy_url: str | None,
+    *,
+    timeout: float,
+    retries: int,
+    probe_bytes: int = DEFAULT_ROUTE_PROBE_BYTES,
+    probe_timeout: float = DEFAULT_ROUTE_PROBE_TIMEOUT,
+) -> tuple[DownloadRoute, dict[str, object], dict[str, str] | None]:
+    """Compare direct and HTTP-proxy media paths using fresh signed URLs."""
+    direct = DownloadRoute("direct")
+    normalized_proxy = validate_media_proxy(proxy_url)
+    if not normalized_proxy:
+        record = {"chosen": direct.name, "proxy": "disabled"}
+        set_dl_progress_route(direct.name, record)
+        return direct, record, None
+
+    candidate = next(
+        (item for item in items if item.get("canonical_url") and item.get("media_url")),
+        None,
+    )
+    if candidate is None:
+        record = {"chosen": direct.name, "proxy": "no-canonical-url"}
+        set_dl_progress_route(direct.name, record)
+        return direct, record, None
+
+    routes = [direct, DownloadRoute("http-proxy", normalized_proxy)]
+    results: dict[str, object] = {}
+    fresh_items: dict[str, dict[str, str]] = {}
+    set_dl_progress_stage("route-probe")
+    for route in routes:
+        probe_item = dict(candidate)
+        try:
+            import crawler
+
+            resolver_opener = crawler.build_opener(proxy_url=route.proxy_url)
+            # Always resolve a new signed URL for both candidates.  Reusing the
+            # direct URL would make a proxy route look falsely unavailable.
+            refresh_media(probe_item, min(timeout, probe_timeout), max(0, min(retries, 2)), None, opener=resolver_opener)
+            fresh_items[route.name] = probe_item
+            speed, received = probe_media(
+                build_download_opener(route.proxy_url),
+                probe_item,
+                timeout=probe_timeout,
+                max_bytes=probe_bytes,
+            )
+            results[route.name] = _route_probe_record(speed, received)
+        except Exception as exc:
+            # Do not persist URLs or exception text (which may contain a
+            # signed query string); expose only a stable class label.
+            results[route.name] = _route_probe_record(error=type(exc).__name__)
+        set_dl_progress_route(None, {**results, "chosen": None})
+
+    direct_speed = float((results.get("direct") or {}).get("speedBytesS") or 0)
+    proxy_speed = float((results.get("http-proxy") or {}).get("speedBytesS") or 0)
+    proxy_wins = proxy_speed > 0 and (
+        direct_speed <= 0 or proxy_speed >= direct_speed * ROUTE_PROXY_MIN_GAIN
+    )
+    selected = routes[1] if proxy_wins else direct
+    record = {**results, "chosen": selected.name}
+    set_dl_progress_route(selected.name, record)
+    selected_item = fresh_items.get(selected.name)
+    # The caller may copy these fresh fields onto the first work item.  The
+    # proxy route still refreshes every item in its worker for route binding.
+    return selected, record, selected_item
+
+
+def build_route_resolver_opener(route: DownloadRoute) -> urllib.request.OpenerDirector:
+    """Build the cookie-bearing detail-page opener for a chosen route."""
+    import crawler
+
+    return crawler.build_opener(proxy_url=route.proxy_url)
 
 
 def update_media_cache(path: Path | None, items: list[dict[str, str]], blocked_keys: set[str] | None = None) -> None:
@@ -763,7 +1131,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--max-bytes", type=int, default=4 * 1024 * 1024 * 1024)
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--retries", type=int, default=5)
+    parser.add_argument(
+        "--refresh-retries",
+        type=int,
+        default=DEFAULT_REFRESH_RETRIES,
+        help="媒体地址失效或命中代理 Fake-IP 后，重新解析并换线路的额外次数",
+    )
     parser.add_argument("--link-max-age", type=float, default=180.0, help="超过该秒数后下载前刷新媒体链接")
+    parser.add_argument(
+        "--media-proxy",
+        default=os.environ.get(MEDIA_PROXY_ENV, ""),
+        help="仅媒体请求使用的 HTTP 代理；默认读取 MEDIA_HTTP_PROXY",
+    )
+    parser.add_argument("--route-probe-bytes", type=int, default=DEFAULT_ROUTE_PROBE_BYTES)
+    parser.add_argument("--route-probe-timeout", type=float, default=DEFAULT_ROUTE_PROBE_TIMEOUT)
     parser.add_argument("--progress", type=Path)
     args = parser.parse_args(argv)
     if args.limit < 0:
@@ -776,6 +1157,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--concurrency 必须在 1 到 16 之间")
     if not 0 <= args.retries <= 10:
         parser.error("--retries 必须在 0 到 10 之间")
+    if not 0 <= args.refresh_retries <= MAX_REFRESH_RETRIES:
+        parser.error(f"--refresh-retries 必须在 0 到 {MAX_REFRESH_RETRIES} 之间")
+    if not MIN_ROUTE_PROBE_BYTES <= args.route_probe_bytes <= 16 * 1024 * 1024:
+        parser.error("--route-probe-bytes 必须在 64 KiB 到 16 MiB 之间")
+    if not 1 <= args.route_probe_timeout <= 30:
+        parser.error("--route-probe-timeout 必须在 1 到 30 秒之间")
     return args
 
 
@@ -791,23 +1178,69 @@ def main(argv: list[str] | None = None) -> int:
     partial_dir.mkdir(parents=True, exist_ok=True)
     set_dl_progress_target(args.progress, len(items), args.concurrency)
 
+    try:
+        media_proxy = validate_media_proxy(args.media_proxy)
+    except DownloadError as exc:
+        # A malformed optional proxy must never take down an otherwise usable
+        # direct download task.
+        print(f"[route] 忽略无效媒体代理配置: {exc}", file=sys.stderr)
+        media_proxy = None
+    selected_route, route_probe, fresh_probe_item = select_download_route(
+        items,
+        media_proxy,
+        timeout=args.timeout,
+        retries=args.retries,
+        probe_bytes=args.route_probe_bytes,
+        probe_timeout=args.route_probe_timeout,
+    )
+    set_dl_progress_stage("downloading")
+    if fresh_probe_item and selected_route.name == "direct":
+        # Reuse the already-fresh direct URL for the first item only; all
+        # other items retain the downloader's normal age/expiry policy.
+        for item in items:
+            if item.get("viewkey") == fresh_probe_item.get("viewkey"):
+                item.update({key: fresh_probe_item[key] for key in ("media_url", "resolved_at") if key in fresh_probe_item})
+                break
+    print(
+        f"[route] selected={selected_route.name} "
+        f"direct={float((route_probe.get('direct') or {}).get('speedBytesS') or 0):.0f} B/s "
+        f"proxy={float((route_probe.get('http-proxy') or {}).get('speedBytesS') or 0):.0f} B/s",
+        file=sys.stderr,
+    )
+
     results_by_key: dict[str, dict[str, object]] = {}
     results_lock = threading.Lock()
     limiter = RateLimiter(args.delay)
+    resolver_limiter = RateLimiter(max(2.0, args.delay))
     content_history = ContentHistory(args.content_history)
 
     def process_item(item: dict[str, str]) -> None:
-        opener = build_download_opener()
         result: dict[str, object]
         try:
-            age = _resolved_age_seconds(item.get("resolved_at", ""))
-            if item.get("canonical_url") and age is not None and age > args.link_max_age:
-                refresh_media(item, args.timeout, args.retries, _update_dl_item)
-            try:
-                result = download_one(opener, item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter, content_history=content_history)
-            except ExpiredMediaError:
-                refresh_media(item, args.timeout, args.retries, _update_dl_item)
-                result = download_one(build_download_opener(), item, args.output_dir, partial_dir, timeout=args.timeout, max_bytes=args.max_bytes, retries=args.retries, progress_callback=_update_dl_item, rate_limiter=limiter, content_history=content_history)
+            result = download_with_auto_refresh(
+                item,
+                selected_route=selected_route,
+                media_proxy=media_proxy,
+                output_dir=args.output_dir,
+                partial_dir=partial_dir,
+                timeout=args.timeout,
+                max_bytes=args.max_bytes,
+                retries=args.retries,
+                refresh_retries=args.refresh_retries,
+                link_max_age=args.link_max_age,
+                progress_callback=_update_dl_item,
+                rate_limiter=limiter,
+                resolver_limiter=resolver_limiter,
+                content_history=content_history,
+            )
+        except AutoRefreshExhausted as exc:
+            result = {
+                "viewkey": item.get("viewkey"),
+                "status": "failed",
+                "error": str(exc.cause),
+                "autoRetries": exc.attempts,
+            }
+            print(f"[{item.get('viewkey')}] error: {exc.cause}", file=sys.stderr)
         except Exception as exc:
             mismatch = is_media_mismatch_error(exc)
             result = {

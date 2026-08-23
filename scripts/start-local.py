@@ -17,13 +17,18 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from auth_cookie import MAX_COOKIE_BYTES, AuthCookieError, replace_auth_profile, validate_stored_profile
 from history_backup import create_backup
 from source_config import SourceConfigError, add_source, load_source_config, remove_source
 from task_lock import lock_is_active, read_lock, update_lock
+from task_history import latest_manual_crawl_event
 
 PROJECT = Path(__file__).resolve().parents[1]
 REFRESH = PROJECT / "scripts" / "refresh-monitor.py"
 SOURCE_CONFIG = PROJECT / "config" / "daily-sources.json"
+AUTH_COOKIE_FILE = Path(os.environ.get("AUTH_COOKIE_FILE", PROJECT / "data" / "auth-cookie.txt"))
+AUTH_USER_AGENT_FILE = Path(os.environ.get("AUTH_USER_AGENT_FILE", PROJECT / "data" / "auth-user-agent.txt"))
+RUN_HISTORY = PROJECT / "data" / "run-history.jsonl"
 SNAPSHOT_WAKEUP = threading.Event()
 
 
@@ -38,7 +43,9 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     start_guard = threading.Lock()
     source_guard = threading.Lock()
+    cookie_guard = threading.Lock()
     start_pending = False
+    last_cookie_update = 0.0
 
     @classmethod
     def clear_start_pending_when_done(cls, process: subprocess.Popen) -> None:
@@ -55,7 +62,22 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
             parsed = urlsplit(origin)
         except ValueError:
             return ""
-        return origin if parsed.scheme in {"http", "https"} and parsed.hostname in {"localhost", "127.0.0.1", "::1"} else ""
+        forwarded_scheme = (self.headers.get("X-Forwarded-Proto") or "http").split(",", 1)[0].strip().lower()
+        forwarded_host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",", 1)[0].strip().lower()
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+            or forwarded_scheme not in {"http", "https"}
+            or not forwarded_host
+        ):
+            return ""
+        expected_origin = f"{forwarded_scheme}://{forwarded_host}"
+        return origin if origin.lower().rstrip("/") == expected_origin else ""
 
     def send_json(self, status: int, payload: dict[str, object]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -113,7 +135,39 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(403, {"error": "拒绝非本地页面发起任务"})
             return
         request_path = urlsplit(self.path).path
-        if request_path == "/api/sources":
+        if request_path == "/api/auth-cookie":
+            if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+                self.send_json(415, {"error": "请求格式必须为 JSON"})
+                return
+            try:
+                body = self.read_json_body(MAX_COOKIE_BYTES + 4096)
+                with self.start_guard:
+                    if self.source_edit_blocked():
+                        self.send_json(409, {"error": "任务运行中，请在任务结束后更新 Cookie"})
+                        return
+                    with self.cookie_guard:
+                        now = time.monotonic()
+                        if now - type(self).last_cookie_update < 5:
+                            self.send_json(429, {"error": "操作过于频繁，请稍后重试"})
+                            return
+                        type(self).last_cookie_update = now
+                        status = replace_auth_profile(
+                            AUTH_COOKIE_FILE,
+                            AUTH_USER_AGENT_FILE,
+                            body.get("cookie"),
+                            body.get("userAgent"),
+                        )
+            except SourceConfigError as exc:
+                self.send_json(400, {"error": str(exc)})
+                return
+            except AuthCookieError as exc:
+                self.send_json(422, {"error": str(exc)})
+                return
+            except OSError:
+                self.send_json(500, {"error": "Cookie 更新未完成，现有配置未清空"})
+                return
+            self.send_json(200, {"success": True, "cookie": status})
+        elif request_path == "/api/sources":
             try:
                 body = self.read_json_body()
                 with self.start_guard:
@@ -144,7 +198,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                     self.send_json(409, {"error": "请先添加至少一个抓取链接", "code": "no_sources"})
                     return
                 proc = self.launch_task(
-                    [sys.executable, str(PROJECT / "scripts" / "run-daily-crawl.py"), "--download"],
+                    [sys.executable, str(PROJECT / "scripts" / "run-daily-crawl.py"), "--download", "--trigger", "manual"],
                     "api-crawl",
                 )
                 if proc is None:
@@ -162,7 +216,7 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
                     "api-repair",
                 )
                 if proc is None:
-                    self.send_json(500, {"error": "无法启动失败项修复"})
+                    self.send_json(500, {"error": "无法启动待处理项复核"})
                     return
             self.send_json(202, {"success": True, "pid": proc.pid, "mode": "repair"})
         elif request_path == "/api/task/control":
@@ -170,10 +224,12 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
             if not lock_is_active(lock_path):
                 self.send_json(409, {"error": "当前没有运行中的任务"})
                 return
+            if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+                self.send_json(415, {"error": "控制请求必须为 JSON"})
+                return
             try:
-                length = min(1024, int(self.headers.get("Content-Length") or 0))
-                body = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
-            except (ValueError, UnicodeError, json.JSONDecodeError):
+                body = self.read_json_body(1024)
+            except SourceConfigError:
                 self.send_json(400, {"error": "控制请求无效"})
                 return
             action = str(body.get("action") or "") if isinstance(body, dict) else ""
@@ -219,7 +275,13 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         request_path = urlsplit(self.path).path
-        if request_path == "/api/sources":
+        if request_path == "/api/auth-cookie":
+            self.send_json(200, {"cookie": validate_stored_profile(
+                AUTH_COOKIE_FILE,
+                AUTH_USER_AGENT_FILE,
+                latest_manual_crawl=latest_manual_crawl_event(RUN_HISTORY),
+            )})
+        elif request_path == "/api/sources":
             try:
                 config = load_source_config(SOURCE_CONFIG)
             except SourceConfigError as exc:
@@ -298,12 +360,15 @@ class TaskHandler(http.server.BaseHTTPRequestHandler):
         origin = self.allowed_origin()
         if self.headers.get("Origin") and not origin:
             self.send_response(403)
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        self.send_response(200)
+        self.send_response(204)
         if origin:
             self.send_header('Access-Control-Allow-Origin', origin)
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def log_message(self, format, *args):

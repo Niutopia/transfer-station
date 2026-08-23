@@ -10,10 +10,16 @@ services:
       - "127.0.0.1:3000:3000"
     environment:
       TZ: Asia/Shanghai
-      # Clash/Mihomo Fake-IP is accepted only for this known public media host.
-      TRUSTED_PROXY_FAKE_IP_HOSTS: la.btc620.com
+      # Fake-IP is only a fallback: Mihomo's fake-ip-filter already returns the
+      # real public IP for these media hosts.  Keep the list to exact hosts and
+      # narrow suffixes (leading dot) so the Fake-IP range stays untrusted.
+      TRUSTED_PROXY_FAKE_IP_HOSTS: la.btc620.com,.rsc.cdn77.org
       # Read locally mounted session data without putting secrets in the image.
       AUTH_COOKIE_FILE: /app/data/auth-cookie.txt
+      # Dedicated media-only route probe.  Keep this separate from HTTP_PROXY
+      # so crawler/API requests remain direct; Docker Desktop exposes the host
+      # through this name (Linux Compose can map it to host-gateway).
+      MEDIA_HTTP_PROXY: http://host.docker.internal:7897
     volumes:
       - ./data:/app/data
       - ./history-backups:/app/history-backups

@@ -28,7 +28,17 @@ def load_source_config(path: Path) -> dict[str, object]:
         raise SourceConfigError("抓取页数配置无效") from exc
     if not 1 <= pages_per_source <= 20:
         raise SourceConfigError("每个来源的抓取页数必须在 1 到 20 之间")
-    return {"pagesPerSource": pages_per_source, "sources": sources}
+    normalized_sources: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in sources:
+        if not isinstance(item, dict):
+            raise SourceConfigError("抓取链接配置格式无效")
+        source = normalize_source(str(item.get("name") or ""), str(item.get("url") or ""))
+        if source["url"] in seen:
+            raise SourceConfigError("抓取链接配置包含重复项")
+        seen.add(source["url"])
+        normalized_sources.append(source)
+    return {"pagesPerSource": pages_per_source, "sources": normalized_sources}
 
 
 def normalize_source(name: str, raw_url: str) -> dict[str, str]:

@@ -31,23 +31,50 @@ from typing import Iterable
 
 
 DEFAULT_URL = "https://91porn.com/v.php?category=hot&viewtype=basic"
-DEFAULT_USER_AGENT = "Mozilla/5.0 (compatible; PublicVideoIndexer/1.0)"
+# Cloudflare clearance is bound to the browser profile that issued the session
+# cookie. Keep the default aligned with the local Edge session, while allowing
+# an explicit override when that browser profile changes.
+DEFAULT_USER_AGENT = os.environ.get(
+    "CRAWLER_USER_AGENT",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 "
+    "Safari/537.36 Edg/150.0.0.0",
+)
 MAX_HTML_BYTES = 8 * 1024 * 1024
 MEDIA_EXTENSIONS = {".mp4", ".m4v", ".webm", ".m3u8"}
 VIDEO_FILE_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
 SIGNATURE_KEYS = {"st", "f", "e", "sig", "signature", "token"}
 AUTH_COOKIE_ENV = "AUTH_COOKIE_FILE"
+AUTH_USER_AGENT_ENV = "AUTH_USER_AGENT_FILE"
 MAX_AUTH_COOKIE_BYTES = 64 * 1024
+MAX_AUTH_USER_AGENT_BYTES = 512
+CLOUDFLARE_CHALLENGE_MARKERS = (b"cf-chl-", b"_cf_chl_opt")
 
 
 class CrawlerError(RuntimeError):
     pass
 
 
+class CloudflareChallengeError(CrawlerError):
+    """A real crawl request was stopped by Cloudflare's browser challenge."""
+
+
 class MediaMismatchError(CrawlerError):
     """The detail page served media that does not belong to the listing item."""
 
-    pass
+
+def is_cloudflare_challenge(body: bytes, headers: object | None = None) -> bool:
+    """Identify an actual Cloudflare challenge, not a normal page using CF scripts."""
+    if headers is not None:
+        try:
+            if str(headers.get("cf-mitigated") or "").lower() == "challenge":  # type: ignore[attr-defined]
+                return True
+        except (AttributeError, TypeError):
+            pass
+    lowered = body.lower()
+    if re.search(rb"<title[^>]*>\s*just a moment(?:\.{3})?\s*</title>", lowered):
+        return True
+    return any(marker in lowered for marker in CLOUDFLARE_CHALLENGE_MARKERS)
 
 
 class MediaUnavailableError(CrawlerError):
@@ -67,12 +94,26 @@ class Candidate:
     title: str = ""
     thumbnail_url: str = ""
     duration: str = ""
+    asset_id: str = ""
+
+    def consistent_asset(self) -> bool:
+        """Report whether this card's own player id matches the thumbnail it renders.
+
+        The listing repeats every viewkey across several cards and some of those
+        cards render a neighbouring video's thumbnail.  Only the card whose
+        ``playvthumb_<id>`` overlay agrees with its own ``/thumb/<id>.jpg``
+        describes the video the detail page will actually serve, so that card is
+        the one worth keeping.
+        """
+        return bool(self.asset_id) and self.asset_id == media_asset_identifier(self.thumbnail_url)
 
     def score(self) -> int:
-        # The visible listing cards currently use c=llzvq. The page also emits a
-        # second, duplicated card set. Prefer the visible set but keep a fallback.
+        # Self consistency beats every other hint: the tracking class the site
+        # uses for its visible cards changes over time (it was c=llzvq), while a
+        # card that contradicts its own player id is always the wrong one.
         return (
-            (8 if self.tracking_class == "llzvq" else 0)
+            (16 if self.consistent_asset() else 0)
+            + (8 if self.tracking_class == "llzvq" else 0)
             + (2 if self.title else 0)
             + (1 if self.thumbnail_url else 0)
             + (1 if self.duration else 0)
@@ -89,6 +130,14 @@ class Video:
     source_pages: list[int] = field(default_factory=list)
     media_url: str = ""
     resolved_at: str = ""
+    asset_id: str = ""
+
+    def consistent_asset(self) -> bool:
+        """Same self-consistency check as :meth:`Candidate.consistent_asset`."""
+        return bool(self.asset_id) and self.asset_id == media_asset_identifier(self.thumbnail_url)
+
+
+PLAYER_THUMB_ID = re.compile(r"playvthumb_(\d+)")
 
 
 class ListingParser(HTMLParser):
@@ -123,6 +172,10 @@ class ListingParser(HTMLParser):
 
         if self.current is None:
             return
+        if not self.current.asset_id:
+            overlay = PLAYER_THUMB_ID.search(values.get("id", ""))
+            if overlay:
+                self.current.asset_id = overlay.group(1)
         if tag.lower() == "img" and not self.current.thumbnail_url:
             src = html.unescape(values.get("src", ""))
             self.current.thumbnail_url = urllib.parse.urljoin(self.base_url, src)
@@ -244,6 +297,7 @@ def parse_listing(body: str, base_url: str, page: int) -> list[Video]:
             thumbnail_url=item.thumbnail_url,
             duration=item.duration,
             source_pages=[page],
+            asset_id=item.asset_id,
         )
         for item in best.values()
     ]
@@ -257,10 +311,21 @@ def merge_videos(pages: Iterable[list[Video]]) -> list[Video]:
             if current is None:
                 merged[video.viewkey] = video
                 continue
+            # A card that agrees with its own player id wins over one that does
+            # not, even when the disagreeing card was seen on an earlier page.
+            if video.consistent_asset() and not current.consistent_asset():
+                video.source_pages = sorted(set(current.source_pages + video.source_pages))
+                for attr in ("title", "thumbnail_url", "duration", "media_url", "resolved_at"):
+                    if not getattr(video, attr) and getattr(current, attr):
+                        setattr(video, attr, getattr(current, attr))
+                merged[video.viewkey] = video
+                continue
             current.source_pages = sorted(set(current.source_pages + video.source_pages))
             for attr in ("title", "thumbnail_url", "duration", "media_url", "resolved_at"):
                 if not getattr(current, attr) and getattr(video, attr):
                     setattr(current, attr, getattr(video, attr))
+            if not current.asset_id and video.asset_id:
+                current.asset_id = video.asset_id
     return list(merged.values())
 
 
@@ -291,6 +356,7 @@ def load_video_cache(path: Path | None) -> dict[str, Video]:
             source_pages=[int(page) for page in source_pages if isinstance(page, int)] if isinstance(source_pages, list) else [],
             media_url=str(row.get("media_url") or ""),
             resolved_at=str(row.get("resolved_at") or ""),
+            asset_id=str(row.get("asset_id") or ""),
         )
     return cache
 
@@ -359,6 +425,60 @@ def load_blocked_media_history(path: Path | None) -> dict[str, dict[str, object]
     }
 
 
+def load_ignored_media_keys(path: Path | None) -> set[str]:
+    """Load explicitly user-ignored media keys without changing the file.
+
+    Ignoring is an opt-in, reversible decision.  This reader deliberately has
+    no write/merge side effect, so a resolver or download failure can never
+    silently become permanently ignored.
+    """
+    if path is None or not path.exists():
+        return set()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set()
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if isinstance(items, dict):
+        candidates = items.keys()
+    elif isinstance(items, list):
+        # Accept a simple list as a migration-friendly read-only fallback.
+        candidates = (
+            item.get("viewkey") if isinstance(item, dict) else item
+            for item in items
+        )
+    else:
+        return set()
+    return {
+        str(viewkey)
+        for viewkey in candidates
+        if valid_viewkey(str(viewkey))
+    }
+
+
+def write_blocked_media_history(path: Path, items: dict[str, dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"version": 1, "items": items}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def prune_blocked_media_history(path: Path | None, completed_keys: set[str]) -> int:
+    """Remove obsolete safety blocks for items that later completed."""
+    if path is None or not completed_keys:
+        return 0
+    items = load_blocked_media_history(path)
+    remaining = {key: value for key, value in items.items() if key not in completed_keys}
+    removed = len(items) - len(remaining)
+    if removed:
+        write_blocked_media_history(path, remaining)
+    return removed
+
+
 def matching_blocked_failures(
     videos: Iterable[Video],
     history: dict[str, dict[str, object]],
@@ -421,14 +541,7 @@ def update_blocked_media_history(
         changed = True
     if not changed:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps({"version": 1, "items": items}, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, path)
+    write_blocked_media_history(path, items)
 
 
 def select_for_processing(
@@ -436,11 +549,15 @@ def select_for_processing(
     history: dict[str, Video],
     existing_keys: set[str] | None,
     success_keys: set[str] | None = None,
+    *,
+    new_only: bool = False,
+    ignored_keys: set[str] | None = None,
 ) -> tuple[list[Video], int, int, int]:
     processing: list[Video] = []
     new_count = 0
     retry_count = 0
     skipped_count = 0
+    ignored = ignored_keys or set()
     for video in videos:
         file_exists = existing_keys is not None and video.viewkey in existing_keys
         previous = history.get(video.viewkey)
@@ -449,9 +566,23 @@ def select_for_processing(
                 if not getattr(video, attr) and getattr(previous, attr):
                     setattr(video, attr, getattr(previous, attr))
 
+        # This list is explicitly maintained by the user and is reversible by
+        # removing an entry.  Never add resolver/download failures here.
+        if video.viewkey in ignored:
+            skipped_count += 1
+            continue
+
         # The staging directory is a transfer area. Once a video has completed,
         # moving or deleting it is intentional and must not create a retry.
         if success_keys is not None and video.viewkey in success_keys:
+            skipped_count += 1
+            continue
+
+        # Daily runs can opt into a strict new-only queue.  Previously seen
+        # items (including unresolved or missing files) are left for the
+        # explicit repair workflow, so a verification page or transient source
+        # response cannot cause the same detail URL to be revisited every run.
+        if new_only and previous is not None:
             skipped_count += 1
             continue
 
@@ -477,7 +608,21 @@ def select_for_processing(
 
 def configured_auth_cookie_file() -> Path | None:
     raw = os.environ.get(AUTH_COOKIE_ENV, "").strip()
-    return Path(raw) if raw else None
+    return Path(raw) if raw else Path(__file__).resolve().parents[1] / "data" / "auth-cookie.txt"
+
+
+def configured_user_agent() -> str:
+    raw_path = os.environ.get(AUTH_USER_AGENT_ENV, "").strip()
+    path = Path(raw_path) if raw_path else Path(__file__).resolve().parents[1] / "data" / "auth-user-agent.txt"
+    try:
+        if path.stat().st_size > MAX_AUTH_USER_AGENT_BYTES:
+            return DEFAULT_USER_AGENT
+        value = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return DEFAULT_USER_AGENT
+    if not value or "\r" in value or "\n" in value or not value.startswith("Mozilla/5.0"):
+        return DEFAULT_USER_AGENT
+    return value
 
 
 def load_auth_cookie_jar(path: Path | None = None) -> http.cookiejar.CookieJar:
@@ -526,9 +671,47 @@ def auth_cookie_configured(path: Path | None = None) -> bool:
     return any(True for _cookie in load_auth_cookie_jar(path))
 
 
-def build_opener(cookie_file: Path | None = None) -> urllib.request.OpenerDirector:
+def build_opener(
+    cookie_file: Path | None = None,
+    proxy_url: str | None = None,
+) -> urllib.request.OpenerDirector:
+    """Build a crawler opener with cookies and an explicit network route.
+
+    ``urllib`` installs a default :class:`ProxyHandler` which reads the
+    process environment when no handler is supplied.  Pass an explicit empty
+    mapping for the normal direct route so a download-only proxy setting cannot
+    accidentally change listing/detail requests.  When a proxy is requested,
+    use the same HTTP proxy for both HTTP and HTTPS targets (HTTPS is handled
+    through CONNECT by ``urllib``).
+    """
+    proxy = str(proxy_url or "").strip()
+    if proxy:
+        try:
+            parsed = urllib.parse.urlsplit(proxy)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise CrawlerError("代理地址格式无效") from exc
+        if (
+            parsed.scheme.lower() not in {"http", "https"}
+            or not hostname
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise CrawlerError("代理地址必须是带主机名的 HTTP/HTTPS URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise CrawlerError("代理地址不能包含用户凭据")
+        if port is not None and not 1 <= port <= 65535:
+            raise CrawlerError("代理端口无效")
+        proxy_mapping = {"http": proxy, "https": proxy}
+    else:
+        # Do not inherit HTTP(S)_PROXY/ALL_PROXY from the container or host.
+        proxy_mapping = {}
     jar = load_auth_cookie_jar(cookie_file)
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler(proxy_mapping),
+        urllib.request.HTTPCookieProcessor(jar),
+    )
 
 
 class RateLimiter:
@@ -578,12 +761,17 @@ def fetch_html(
                 raw = response.read(MAX_HTML_BYTES + 1)
                 if len(raw) > MAX_HTML_BYTES:
                     raise CrawlerError("HTML 响应超过 8 MiB 限制")
+                if is_cloudflare_challenge(raw, response.headers):
+                    raise CloudflareChallengeError(f"Cloudflare Challenge: {path}")
                 charset = response.headers.get_content_charset() or "utf-8"
                 return raw.decode(charset, errors="replace")
         except urllib.error.HTTPError as exc:
             status_code = exc.code
             response_headers = exc.headers
+            error_body = exc.read(64 * 1024) if status_code == 403 else b""
             exc.close()
+            if status_code == 403 and is_cloudflare_challenge(error_body, response_headers):
+                raise CloudflareChallengeError(f"Cloudflare Challenge: {path}") from exc
             retryable = status_code in {408, 425, 429, 500, 502, 503, 504}
             if not retryable or attempt >= retries:
                 raise CrawlerError(f"HTTP {status_code}: {path}") from exc
@@ -715,6 +903,16 @@ _progress_total = 0
 _progress_done = 0
 
 
+def write_progress_state(path: Path | None, payload: dict[str, object]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
 def set_progress_target(path: Path | None, total: int) -> None:
     global _progress_path, _progress_total, _progress_done
     with _progress_lock:
@@ -728,11 +926,7 @@ def _write_progress() -> None:
     with _progress_lock:
         if _progress_path is None:
             return
-        payload = json.dumps({"total": _progress_total, "done": _progress_done, "stage": "resolving"}, ensure_ascii=False)
-        tmp = _progress_path.with_suffix(_progress_path.suffix + ".tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, _progress_path)
+        write_progress_state(_progress_path, {"total": _progress_total, "done": _progress_done, "stage": "resolving"})
 
 
 def resolve_media(
@@ -746,6 +940,7 @@ def resolve_media(
     retries: int = 4,
     rate_limiter: RateLimiter | None = None,
     continue_on_error: bool = False,
+    identity_attempts: int | None = None,
 ) -> list[dict[str, str]]:
     done_lock = threading.Lock()
     worker_state = threading.local()
@@ -753,7 +948,8 @@ def resolve_media(
 
     def failure_record(video: Video, exc: Exception) -> dict[str, str]:
         kind = (
-            "media_mismatch" if isinstance(exc, MediaMismatchError)
+            "auth_challenge" if isinstance(exc, CloudflareChallengeError)
+            else "media_mismatch" if isinstance(exc, MediaMismatchError)
             else "media_unavailable" if isinstance(exc, MediaUnavailableError)
             else "resolve_error"
         )
@@ -780,8 +976,11 @@ def resolve_media(
             # The site occasionally serves an unrelated legacy player while the
             # surrounding detail page is correct. Re-fetch a mismatch before
             # permanently safety-blocking the item.
-            identity_attempts = max(1, min(3, retries + 1))
-            for identity_attempt in range(identity_attempts):
+            check_attempts = max(
+                1,
+                min(3, identity_attempts if identity_attempts is not None else retries + 1),
+            )
+            for identity_attempt in range(check_attempts):
                 body = fetch_html(
                     opener if concurrency <= 1 else worker_opener(),
                     video.canonical_url,
@@ -794,14 +993,14 @@ def resolve_media(
                 try:
                     validate_player_identity(video, sources, posters)
                 except MediaMismatchError:
-                    if identity_attempt + 1 >= identity_attempts:
+                    if identity_attempt + 1 >= check_attempts:
                         raise
                     continue
                 media_url = choose_media_url(sources)
                 if not media_url:
-                    if identity_attempt + 1 >= identity_attempts:
+                    if identity_attempt + 1 >= check_attempts:
                         raise MediaUnavailableError(
-                            f"详情页未发现可下载媒体（viewkey={video.viewkey}，已复核 {identity_attempts} 次）"
+                            f"详情页未发现可下载媒体（viewkey={video.viewkey}，已复核 {check_attempts} 次）"
                         )
                     continue
                 video.media_url = media_url
@@ -846,10 +1045,8 @@ def write_csv(path: Path, videos: list[Video]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["viewkey", "canonical_url", "title", "thumbnail_url", "duration", "source_pages", "media_url", "resolved_at"],
-        )
+        fieldnames = ["viewkey", "canonical_url", "title", "thumbnail_url", "duration", "source_pages", "media_url", "resolved_at"]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for video in videos:
             row = asdict(video)
@@ -876,18 +1073,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=30.0, help="单请求超时秒数")
     parser.add_argument("--resolve-media", action="store_true", help="逐个访问公开详情页并提取媒体 URL")
     parser.add_argument("--resolve-concurrency", type=int, default=5, help="媒体解析并发数（默认 5，设为 1 回退到串行）")
+    parser.add_argument("--media-rechecks", type=int, default=3, help="同一详情页无媒体/身份不一致时的复核次数（默认 3）")
     parser.add_argument("--listing-concurrency", type=int, default=2, help="列表页并发数（默认 2）")
     parser.add_argument("--retries", type=int, default=4, help="瞬时网络错误重试次数（默认 4）")
     parser.add_argument("--progress", type=Path, help="进度文件路径；解析时写入 done/total JSON")
     parser.add_argument("--history", type=Path, help="跨日历史索引；已见且已下载的视频不再访问详情页")
     parser.add_argument("--success-history", type=Path, help="成功下载的历史名单，用于跳过用户已删文件")
     parser.add_argument("--blocked-history", type=Path, help="已确认错误媒体索引；身份未变化时不再访问详情页")
+    parser.add_argument("--ignored-history", type=Path, help="用户明确忽略的媒体索引；只读且可手动移除恢复")
     parser.add_argument("--existing-dir", type=Path, help="已下载视频目录；历史中缺失文件的条目会重新解析")
+    parser.add_argument("--new-only", action="store_true", help="只解析历史中从未见过的新条目；已见条目交由修复任务处理")
     parser.add_argument("--new-json", type=Path, help="只输出本次新增或需重试条目的 JSON")
     parser.add_argument("--new-csv", type=Path, help="只输出本次新增或需重试条目的 CSV")
     parser.add_argument("--json", type=Path, default=Path("videos.json"), help="JSON 输出路径")
     parser.add_argument("--csv", type=Path, default=Path("videos.csv"), help="CSV 输出路径")
-    parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
+    parser.add_argument("--user-agent", default=configured_user_agent())
     args = parser.parse_args(argv)
     if not 1 <= args.pages <= 20:
         parser.error("--pages 必须在 1 到 20 之间")
@@ -897,6 +1097,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--timeout 必须在 1 到 120 秒之间")
     if not 1 <= args.listing_concurrency <= 5:
         parser.error("--listing-concurrency 必须在 1 到 5 之间")
+    if not 1 <= args.resolve_concurrency <= 16:
+        parser.error("--resolve-concurrency 必须在 1 到 16 之间")
+    if not 1 <= args.media_rechecks <= 3:
+        parser.error("--media-rechecks 必须在 1 到 3 之间")
     if not 0 <= args.retries <= 10:
         parser.error("--retries 必须在 0 到 10 之间")
     args.urls = args.urls or [DEFAULT_URL]
@@ -939,6 +1143,7 @@ def main(argv: list[str] | None = None) -> int:
     jobs = [(source_index, base_url, page) for source_index, base_url in enumerate(args.urls) for page in range(1, args.pages + 1)]
     page_results = []
     listing_failures: list[dict[str, object]] = []
+    write_progress_state(args.progress, {"stage": "listing", "done": 0, "total": len(jobs), "listingFailures": 0})
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.listing_concurrency) as pool:
         futures = {pool.submit(listing_worker, *job): job for job in jobs}
         for future in concurrent.futures.as_completed(futures):
@@ -946,9 +1151,34 @@ def main(argv: list[str] | None = None) -> int:
                 page_results.append(future.result())
             except Exception as exc:
                 source_index, base_url, page = futures[future]
-                listing_failures.append({"source": source_index + 1, "page": page, "url": validate_listing_url(base_url), "error": str(exc)})
+                listing_failures.append({
+                    "source": source_index + 1,
+                    "page": page,
+                    "url": validate_listing_url(base_url),
+                    "error": str(exc),
+                    "kind": "auth_challenge" if isinstance(exc, CloudflareChallengeError) else "request_error",
+                })
                 print(f"source={source_index + 1}/{len(args.urls)} page={page} failed: {exc}", file=sys.stderr)
+            write_progress_state(args.progress, {
+                "stage": "listing",
+                "done": len(page_results) + len(listing_failures),
+                "total": len(jobs),
+                "listingFailures": len(listing_failures),
+            })
     if not page_results:
+        auth_failure = bool(listing_failures) and all(item.get("kind") == "auth_challenge" for item in listing_failures)
+        write_progress_state(args.progress, {
+            "stage": "failed",
+            "phase": "listing",
+            "done": len(listing_failures),
+            "total": len(jobs),
+            "listingFailures": len(listing_failures),
+            "authFailure": auth_failure,
+            "rawLinks": 0,
+            "uniqueVideos": 0,
+            "skippedVideos": 0,
+            "error": "所有列表页请求均失败",
+        })
         raise CrawlerError("所有列表页请求均失败")
 
     for source_index, base_url, page, page_raw_links, page_videos in sorted(page_results, key=lambda row: (row[0], row[2])):
@@ -969,6 +1199,18 @@ def main(argv: list[str] | None = None) -> int:
         })
     videos = merge_videos(collected)
     success_keys = load_success_keys(args.success_history)
+    ignored_keys = load_ignored_media_keys(args.ignored_history)
+    ignored_video_keys = {
+        video.viewkey for video in videos if video.viewkey in ignored_keys
+    }
+    # An explicit ignore decision wins over any stale media URL copied from a
+    # cache. Keep the inventory row, but never let it re-enter the download
+    # queue until its key is removed from ignored-media.json.
+    for video in videos:
+        if video.viewkey in ignored_keys:
+            video.media_url = ""
+            video.resolved_at = ""
+    prune_blocked_media_history(args.blocked_history, success_keys)
     success_asset_ids = successful_asset_identifiers(history, success_keys)
     asset_duplicate_keys = {
         video.viewkey
@@ -995,6 +1237,8 @@ def main(argv: list[str] | None = None) -> int:
         history,
         existing_viewkeys(args.existing_dir),
         success_keys,
+        new_only=args.new_only,
+        ignored_keys=ignored_keys,
     )
     resolve_failures: list[dict[str, object]] = list(persisted_block_failures)
     if args.resolve_media:
@@ -1010,6 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
             retries=args.retries,
             rate_limiter=request_limiter,
             continue_on_error=True,
+            identity_attempts=args.media_rechecks,
         )
         resolve_failures.extend(new_resolve_failures)
         update_blocked_media_history(args.blocked_history, processing, new_resolve_failures)
@@ -1026,6 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
         "duplicates_removed": raw_links - len(videos),
         "historical_known_total": len(historical_keys),
         "known_videos_skipped": skipped_count,
+        "ignored_videos": len(ignored_video_keys),
         "asset_duplicates_skipped": len(asset_duplicate_keys),
         "new_videos": new_count,
         "retry_videos": retry_count,

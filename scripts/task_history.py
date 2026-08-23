@@ -46,6 +46,16 @@ def event_result_status(event: object) -> str:
     return "failed"
 
 
+def event_counter(event: object, key: str, fallback: int = 0) -> int:
+    """Read an event counter without treating an explicit zero as missing."""
+    if not isinstance(event, dict) or key not in event:
+        return fallback
+    try:
+        return int(event.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def latest_task_event(path: Path, task_type: str) -> dict[str, object] | None:
     """Return the newest valid history row for one task type."""
     if task_type not in {"crawl", "repair"}:
@@ -63,6 +73,37 @@ def latest_task_event(path: Path, task_type: str) -> dict[str, object] | None:
             isinstance(event, dict)
             and event.get("timestamp")
             and event_task_type(event) == task_type
+        ):
+            return event
+    return None
+
+
+def latest_manual_crawl_event(path: Path) -> dict[str, object] | None:
+    """Return the latest dashboard crawl that conclusively updates Cookie state."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(event, dict)
+            and event.get("timestamp")
+            and event_task_type(event) == "crawl"
+            and event.get("trigger") == "manual"
+            and (
+                event.get("crawlExitCode") == 0
+                or (
+                    event.get("resultStatus") == "failed"
+                    and event.get("authFailure") is True
+                    and isinstance(event.get("authDetectorVersion"), int)
+                    and not isinstance(event.get("authDetectorVersion"), bool)
+                    and event["authDetectorVersion"] >= 2
+                )
+            )
         ):
             return event
     return None

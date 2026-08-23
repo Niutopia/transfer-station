@@ -22,6 +22,7 @@ STAGING = PROJECT / "中转站"
 SNAPSHOT = CRAWLER / "videos-with-media.json"
 REPAIR_INPUT = DATA / "repair-pending.json"
 REPAIR_MANIFEST = DATA / "repair-download-manifest.json"
+IGNORED_MEDIA = DATA / "ignored-media.json"
 RUN_HISTORY = DATA / "run-history.jsonl"
 REFRESH_MONITOR = PROJECT / "scripts" / "refresh-monitor.py"
 VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".ts", ".mkv", ".mov", ".avi"}
@@ -96,6 +97,7 @@ def collect_repair_candidates(
     completed_keys: set[str],
     *,
     retry_blocked: bool = False,
+    ignored_keys: set[str] | None = None,
 ) -> tuple[list[dict[str, object]], set[str]]:
     if not isinstance(snapshot, dict):
         return [], set()
@@ -106,13 +108,14 @@ def collect_repair_candidates(
         for item in failures if is_blocked_failure(item) and item.get("viewkey")
     } if isinstance(failures, list) else set()
     videos = snapshot.get("videos") if isinstance(snapshot.get("videos"), list) else []
+    ignored = ignored_keys or set()
     candidates: list[dict[str, object]] = []
     seen: set[str] = set()
     for raw in videos:
         if not isinstance(raw, dict):
             continue
         key = str(raw.get("viewkey") or "")
-        if not key or key in seen or key in completed_keys or key in blocked_keys:
+        if not key or key in seen or key in completed_keys or key in blocked_keys or key in ignored:
             continue
         seen.add(key)
         candidates.append(dict(raw))
@@ -127,6 +130,7 @@ def as_video(raw: dict[str, object]) -> crawler.Video:
         thumbnail_url=str(raw.get("thumbnail_url") or ""),
         duration=str(raw.get("duration") or ""),
         source_pages=[int(page) for page in raw.get("source_pages", []) if isinstance(page, int)],
+        asset_id=str(raw.get("asset_id") or ""),
     )
 
 
@@ -179,10 +183,12 @@ def run_repair(lock_path: Path) -> int:
     if not isinstance(snapshot, dict):
         snapshot = {}
     completed = success_keys(DATA / "download-success.txt") | existing_keys(STAGING)
+    ignored_keys = crawler.load_ignored_media_keys(IGNORED_MEDIA)
     candidate_dicts, _ = collect_repair_candidates(
         snapshot,
         completed,
         retry_blocked=crawler.auth_cookie_configured(),
+        ignored_keys=ignored_keys,
     )
     archive_completed_progress(DATA / "download-progress.json", DATA / "last-completed-progress.json")
 
@@ -194,11 +200,12 @@ def run_repair(lock_path: Path) -> int:
             crawler.build_opener(),
             attempted,
             timeout=30.0,
-            delay=0.5,
-            user_agent=crawler.DEFAULT_USER_AGENT,
-            concurrency=4,
-            retries=4,
-            rate_limiter=crawler.RateLimiter(0.5),
+            delay=2.0,
+            user_agent=crawler.configured_user_agent(),
+            concurrency=1,
+            retries=2,
+            rate_limiter=crawler.RateLimiter(2.0),
+            identity_attempts=1,
             continue_on_error=True,
         )
         crawler.update_blocked_media_history(DATA / "blocked-media.json", attempted, failures)
@@ -227,6 +234,7 @@ def run_repair(lock_path: Path) -> int:
             "--blocked-history", str(DATA / "blocked-media.json"),
             "--progress", str(DATA / "download-progress.json"),
             "--concurrency", "4", "--retries", "5", "--link-max-age", "180", "--delay", "0.5",
+            "--refresh-retries", "3",
         ], DATA / "logs" / f"repair-download-{stamp}.log")
     else:
         atomic_json(REPAIR_MANIFEST, [])
@@ -235,9 +243,25 @@ def run_repair(lock_path: Path) -> int:
     rows = manifest if isinstance(manifest, list) else []
     mismatch_count, unresolved_count = summarize_repair_failures(failures, rows)
     failed_downloads = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
-    downloaded = sum(1 for row in rows if isinstance(row, dict) and row.get("status") in {"downloaded", "skipped"})
+    downloaded = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "downloaded")
     duplicates = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "duplicate")
     downloaded_bytes = sum(int(row.get("bytes") or 0) for row in rows if isinstance(row, dict) and row.get("status") == "downloaded")
+    auto_retry_attempts = sum(int(row.get("autoRetries") or 0) for row in rows if isinstance(row, dict))
+    auto_retried_videos = sum(
+        1 for row in rows
+        if isinstance(row, dict) and int(row.get("autoRetries") or 0) > 0
+    )
+    auto_recovered_videos = sum(
+        1 for row in rows
+        if isinstance(row, dict)
+        and int(row.get("autoRetries") or 0) > 0
+        and row.get("status") in {"downloaded", "skipped", "duplicate"}
+    )
+    ignored_count = sum(
+        1
+        for raw in (snapshot.get("videos", []) if isinstance(snapshot, dict) else [])
+        if isinstance(raw, dict) and str(raw.get("viewkey") or "") in ignored_keys
+    )
     finished_at = datetime.now().astimezone()
     result_ok = download_code == 0 and unresolved_count == 0 and failed_downloads == 0
     write_event({
@@ -251,7 +275,8 @@ def run_repair(lock_path: Path) -> int:
         "downloadRequested": False,
         "rawLinks": len(attempted),
         "uniqueVideos": len(attempted),
-        "skippedVideos": 0,
+        "skippedVideos": ignored_count,
+        "ignoredVideos": ignored_count,
         "newVideos": 0,
         "retryVideos": len(attempted),
         "downloadedVideos": downloaded,
@@ -259,6 +284,9 @@ def run_repair(lock_path: Path) -> int:
         "blockedVideos": mismatch_count,
         "failedVideos": unresolved_count + failed_downloads,
         "downloadedBytes": downloaded_bytes,
+        "autoRetryAttempts": auto_retry_attempts,
+        "autoRetriedVideos": auto_retried_videos,
+        "autoRecoveredVideos": auto_recovered_videos,
     })
     try:
         create_backup(PROJECT, PROJECT / "history-backups")
