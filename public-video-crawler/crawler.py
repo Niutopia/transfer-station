@@ -49,6 +49,14 @@ AUTH_COOKIE_ENV = "AUTH_COOKIE_FILE"
 AUTH_USER_AGENT_ENV = "AUTH_USER_AGENT_FILE"
 MAX_AUTH_COOKIE_BYTES = 64 * 1024
 MAX_AUTH_USER_AGENT_BYTES = 512
+# The dashboard writes the validated value plus one trailing newline, so a file
+# holding a value of exactly the maximum size is one byte larger.  Comparing the
+# file size against the value limit rejected a legal profile: a 512-byte user
+# agent was silently replaced by the default (breaking the Cookie/UA pairing the
+# whole feature rests on) and a 64 KiB cookie hard-failed the crawl.
+MAX_AUTH_COOKIE_FILE_BYTES = MAX_AUTH_COOKIE_BYTES + 1
+MAX_AUTH_USER_AGENT_FILE_BYTES = MAX_AUTH_USER_AGENT_BYTES + 1
+COOKIE_NAME_PATTERN = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 CLOUDFLARE_CHALLENGE_MARKERS = (b"cf-chl-", b"_cf_chl_opt")
 
 
@@ -605,6 +613,11 @@ def select_for_processing(
         # This list is explicitly maintained by the user and is reversible by
         # removing an entry.  Never add resolver/download failures here.
         if video.viewkey in ignored:
+            # Clearing the URL here, after the history backfill above, is what
+            # actually keeps an ignored item out of the download queue; doing it
+            # before the backfill let a cached URL come straight back.
+            video.media_url = ""
+            video.resolved_at = ""
             skipped_count += 1
             continue
 
@@ -651,7 +664,7 @@ def configured_user_agent() -> str:
     raw_path = os.environ.get(AUTH_USER_AGENT_ENV, "").strip()
     path = Path(raw_path) if raw_path else Path(__file__).resolve().parents[1] / "data" / "auth-user-agent.txt"
     try:
-        if path.stat().st_size > MAX_AUTH_USER_AGENT_BYTES:
+        if path.stat().st_size > MAX_AUTH_USER_AGENT_FILE_BYTES:
             return DEFAULT_USER_AGENT
         value = path.read_text(encoding="utf-8").strip()
     except (OSError, UnicodeError):
@@ -668,7 +681,7 @@ def load_auth_cookie_jar(path: Path | None = None) -> http.cookiejar.CookieJar:
     if cookie_path is None:
         return jar
     try:
-        if cookie_path.stat().st_size > MAX_AUTH_COOKIE_BYTES:
+        if cookie_path.stat().st_size > MAX_AUTH_COOKIE_FILE_BYTES:
             raise CrawlerError("登录 Cookie 文件超过 64 KiB")
         raw = cookie_path.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -679,7 +692,7 @@ def load_auth_cookie_jar(path: Path | None = None) -> http.cookiejar.CookieJar:
         return jar
     for fragment in raw.split(";"):
         name, separator, value = fragment.strip().partition("=")
-        if not separator or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+        if not separator or not COOKIE_NAME_PATTERN.fullmatch(name):
             continue
         jar.set_cookie(http.cookiejar.Cookie(
             version=0,
@@ -1243,16 +1256,7 @@ def main(argv: list[str] | None = None) -> int:
     videos = merge_videos(collected)
     success_keys = load_success_keys(args.success_history)
     ignored_keys = load_ignored_media_keys(args.ignored_history)
-    ignored_video_keys = {
-        video.viewkey for video in videos if video.viewkey in ignored_keys
-    }
-    # An explicit ignore decision wins over any stale media URL copied from a
-    # cache. Keep the inventory row, but never let it re-enter the download
-    # queue until its key is removed from ignored-media.json.
-    for video in videos:
-        if video.viewkey in ignored_keys:
-            video.media_url = ""
-            video.resolved_at = ""
+    ignored_video_count = sum(1 for video in videos if video.viewkey in ignored_keys)
     prune_blocked_media_history(args.blocked_history, success_keys)
     success_asset_ids = successful_asset_identifiers(history, success_keys)
     asset_duplicate_keys = {
@@ -1320,7 +1324,7 @@ def main(argv: list[str] | None = None) -> int:
         "duplicates_removed": raw_links - len(videos),
         "historical_known_total": len(historical_keys),
         "known_videos_skipped": skipped_count,
-        "ignored_videos": len(ignored_video_keys),
+        "ignored_videos": ignored_video_count,
         "asset_duplicates_skipped": len(asset_duplicate_keys),
         "new_videos": new_count,
         "retry_videos": retry_count,

@@ -3,46 +3,40 @@
 
 from __future__ import annotations
 
-import http.cookiejar
 import os
 import re
+import sys
 import tempfile
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+sys.path.append(str(Path(__file__).resolve().parents[1] / "public-video-crawler"))
+# One definition of the credential rules, shared with the crawler that actually
+# uses them.  The copies here had already drifted: the size limits were off by
+# the trailing newline this module writes, so a value the dashboard accepted
+# could be rejected or silently discarded by the crawler.
+from crawler import (  # noqa: E402
+    COOKIE_NAME_PATTERN,
+    MAX_AUTH_COOKIE_BYTES as MAX_COOKIE_BYTES,
+    MAX_AUTH_USER_AGENT_BYTES as MAX_USER_AGENT_BYTES,
+    is_cloudflare_challenge,
+)
 
-TARGET_URL = "https://91porn.com/index.php"
-TARGET_HOSTS = {"91porn.com", "www.91porn.com"}
-MAX_COOKIE_BYTES = 64 * 1024
-MAX_USER_AGENT_BYTES = 512
-MAX_VALIDATION_BYTES = 512 * 1024
-COOKIE_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
-CHALLENGE_MARKERS = (b"cf-chl-", b"_cf_chl_opt")
+
+__all__ = [
+    "AuthCookieError",
+    "auth_cookie_status",
+    "is_cloudflare_challenge",
+    "normalize_cookie_header",
+    "usable_cookie_fields",
+    "normalize_user_agent",
+    "replace_auth_profile",
+    "validate_stored_profile",
+]
 
 
 class AuthCookieError(ValueError):
     pass
-
-
-class AuthCookieProbeError(AuthCookieError):
-    """The remote probe could not prove whether a locally valid profile works."""
-
-
-def is_cloudflare_challenge(body: bytes, headers: object | None = None) -> bool:
-    """Do not mistake Cloudflare assets embedded in a normal page for a challenge."""
-    if headers is not None:
-        try:
-            if str(headers.get("cf-mitigated") or "").lower() == "challenge":  # type: ignore[attr-defined]
-                return True
-        except (AttributeError, TypeError):
-            pass
-    lowered = body.lower()
-    if re.search(rb"<title[^>]*>\s*just a moment(?:\.{3})?\s*</title>", lowered):
-        return True
-    return any(marker in lowered for marker in CHALLENGE_MARKERS)
 
 
 def normalize_cookie_header(raw_value: object) -> tuple[str, list[tuple[str, str]]]:
@@ -69,7 +63,7 @@ def normalize_cookie_header(raw_value: object) -> tuple[str, list[tuple[str, str
         name, separator, value = fragment.partition("=")
         name = name.strip()
         value = value.strip()
-        if not separator or not COOKIE_NAME_RE.fullmatch(name):
+        if not separator or not COOKIE_NAME_PATTERN.fullmatch(name):
             raise AuthCookieError("Cookie Header 中存在无效字段")
         if name in seen:
             continue
@@ -80,6 +74,21 @@ def normalize_cookie_header(raw_value: object) -> tuple[str, list[tuple[str, str
     if "cf_clearance" not in seen:
         raise AuthCookieError("缺少 Cloudflare 验证字段 cf_clearance")
     return "; ".join(f"{name}={value}" for name, value in cookies), cookies
+
+
+def usable_cookie_fields(cookie_value: str) -> list[tuple[str, str]]:
+    """Parse a stored header the way :func:`crawler.load_auth_cookie_jar` does.
+
+    The strict parser above is right for a submission; this lenient one answers
+    the different question of what the crawler is currently sending.
+    """
+    fields: list[tuple[str, str]] = []
+    for fragment in cookie_value.split(";"):
+        name, separator, value = fragment.strip().partition("=")
+        name = name.strip()
+        if separator and COOKIE_NAME_PATTERN.fullmatch(name):
+            fields.append((name, value.strip()))
+    return fields
 
 
 def normalize_user_agent(raw_value: object) -> str:
@@ -93,63 +102,6 @@ def normalize_user_agent(raw_value: object) -> str:
     if not value.startswith("Mozilla/5.0"):
         raise AuthCookieError("请使用获取该 Cookie 的浏览器提交")
     return value
-
-
-def cookie_jar(cookies: list[tuple[str, str]]) -> http.cookiejar.CookieJar:
-    jar = http.cookiejar.CookieJar()
-    for name, value in cookies:
-        jar.set_cookie(http.cookiejar.Cookie(
-            version=0,
-            name=name,
-            value=value,
-            port=None,
-            port_specified=False,
-            domain=".91porn.com",
-            domain_specified=True,
-            domain_initial_dot=True,
-            path="/",
-            path_specified=True,
-            secure=True,
-            expires=None,
-            discard=True,
-            comment=None,
-            comment_url=None,
-            rest={"HttpOnly": None},
-            rfc2109=False,
-        ))
-    return jar
-
-
-def validate_auth_profile(cookie_value: object, user_agent_value: object, *, timeout: float = 20.0) -> tuple[str, str, int]:
-    normalized_cookie, cookies = normalize_cookie_header(cookie_value)
-    user_agent = normalize_user_agent(user_agent_value)
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar(cookies)))
-    request = urllib.request.Request(
-        TARGET_URL,
-        headers={"User-Agent": user_agent, "Accept": "text/html,application/xhtml+xml"},
-    )
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            final = urllib.parse.urlsplit(response.geturl())
-            if final.scheme != "https" or final.hostname not in TARGET_HOSTS:
-                raise AuthCookieProbeError("验证请求被重定向到非目标站点")
-            if response.headers.get_content_type() not in {"text/html", "application/xhtml+xml"}:
-                raise AuthCookieProbeError("验证响应不是网页")
-            body = response.read(MAX_VALIDATION_BYTES + 1)
-    except urllib.error.HTTPError as exc:
-        status = exc.code
-        body = exc.read(32 * 1024)
-        exc.close()
-        if status == 403 and is_cloudflare_challenge(body, exc.headers):
-            raise AuthCookieProbeError("Cloudflare 检测请求被拦截") from exc
-        raise AuthCookieProbeError(f"Cookie 检测请求失败（HTTP {status}）") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise AuthCookieProbeError("暂时无法连接目标站点") from exc
-    if len(body) > MAX_VALIDATION_BYTES:
-        raise AuthCookieProbeError("验证响应异常")
-    if is_cloudflare_challenge(body, response.headers):
-        raise AuthCookieProbeError("Cloudflare 检测请求被拦截")
-    return normalized_cookie, user_agent, len(cookies)
 
 
 def _stage_private_text(path: Path, value: str) -> Path:
@@ -244,14 +196,14 @@ def auth_cookie_status(
     configured = False
     has_clearance = False
     if cookie_value:
-        try:
-            _, cookies = normalize_cookie_header(cookie_value)
-            configured = True
-            has_clearance = any(name == "cf_clearance" for name, _ in cookies)
-            if cookie_count is None:
-                cookie_count = len(cookies)
-        except AuthCookieError:
-            pass
+        # Report what the crawler will actually send.  Using the strict
+        # submission parser here made the dashboard say "未配置" for a session
+        # cookie that every crawl request was already carrying.
+        fields = usable_cookie_fields(cookie_value)
+        configured = bool(fields)
+        has_clearance = any(name == "cf_clearance" for name, _ in fields)
+        if cookie_count is None:
+            cookie_count = len(fields)
     updated_at = None
     if cookie_path.exists():
         try:
@@ -278,6 +230,9 @@ def validate_stored_profile(
     status = auth_cookie_status(cookie_path, user_agent_path)
     if not status["configured"]:
         return {**status, "valid": False, "error": "尚未配置可用 Cookie"}
+    if not status["hasClearance"]:
+        # The crawler will send this header, but Cloudflare will challenge it.
+        return {**status, "valid": False, "error": "缺少 Cloudflare 验证字段 cf_clearance"}
     try:
         user_agent = user_agent_path.read_text(encoding="utf-8")
         normalize_user_agent(user_agent)

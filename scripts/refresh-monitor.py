@@ -15,7 +15,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1] / "public-video-crawler"))
 # Share the crawler's definition of a safe block instead of re-typing the set in
 # every consumer; the copies had already drifted apart.
-from crawler import BLOCKED_MEDIA_FAILURE_KINDS as SAFE_BLOCK_KINDS
+from crawler import BLOCKED_MEDIA_FAILURE_KINDS as SAFE_BLOCK_KINDS, load_ignored_media_keys
 
 from download_history import sync_download_history
 from task_lock import lock_is_active, read_lock
@@ -48,22 +48,6 @@ def load_json(path: Path, fallback):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return fallback
-
-
-def load_ignored_media_keys(path: Path) -> set[str]:
-    """Read the explicit, reversible user ignore list without mutating it."""
-    payload = load_json(path, {})
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if isinstance(items, dict):
-        candidates = items.keys()
-    elif isinstance(items, list):
-        candidates = (
-            item.get("viewkey") if isinstance(item, dict) else item
-            for item in items
-        )
-    else:
-        return set()
-    return {str(key) for key in candidates if str(key or "").strip()}
 
 
 def hours_since(value: object, now: datetime) -> float | None:
