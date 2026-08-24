@@ -407,10 +407,18 @@ def successful_asset_identifiers(
     history: dict[str, Video],
     success_keys: set[str],
 ) -> set[str]:
+    """Index the assets of finished videos, but only where the card agrees with itself.
+
+    A bare thumbnail id is not a video identity: the listing reuses one
+    thumbnail across neighbouring cards, and indexing it marked 8 confirmed
+    cases of *different* videos as already-downloaded, permanently.  Requiring
+    the player id and the thumbnail to agree keeps a mismatched card out of the
+    index entirely.
+    """
     assets = {
-        media_asset_identifier(video.thumbnail_url)
+        video.asset_id
         for viewkey, video in history.items()
-        if viewkey in success_keys
+        if viewkey in success_keys and video.consistent_asset()
     }
     assets.discard("")
     return assets
@@ -1259,11 +1267,14 @@ def main(argv: list[str] | None = None) -> int:
     ignored_video_count = sum(1 for video in videos if video.viewkey in ignored_keys)
     prune_blocked_media_history(args.blocked_history, success_keys)
     success_asset_ids = successful_asset_identifiers(history, success_keys)
+    # Both sides must be self-consistent before this may retire a video without
+    # ever fetching it: the entry it writes to the success history is permanent.
     asset_duplicate_keys = {
         video.viewkey
         for video in videos
         if video.viewkey not in success_keys
-        and media_asset_identifier(video.thumbnail_url) in success_asset_ids
+        and video.consistent_asset()
+        and video.asset_id in success_asset_ids
     }
     if asset_duplicate_keys:
         append_success_keys(args.success_history, asset_duplicate_keys)

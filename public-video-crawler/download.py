@@ -169,14 +169,30 @@ class RateLimiter:
             time.sleep(delay)
 
 
-class ContentHistory:
-    """Thread-safe history of file hashes that have already reached staging."""
+def media_asset_id(url: str) -> str:
+    """The site's own numeric media id, using the crawler's single definition."""
+    import crawler
 
-    def __init__(self, path: Path | None) -> None:
+    return crawler.media_asset_identifier(url)
+
+
+class ContentHistory:
+    """Thread-safe index of media that has already reached staging.
+
+    Two identities are tracked because they answer the requirement "download a
+    video only once" at different costs.  The site's media id is known from the
+    URL, so a repeat can be dropped before a single byte moves; the SHA-256 is
+    only known after the transfer and still catches a re-upload served under a
+    new media id.
+    """
+
+    def __init__(self, path: Path | None, media_cache: Path | None = None) -> None:
         self.path = path
         self._lock = threading.Lock()
         self._items: dict[str, dict[str, object]] = {}
+        self._assets: dict[str, str] = {}
         self._load()
+        self._backfill_assets(media_cache)
 
     def _load(self) -> None:
         if self.path is None:
@@ -190,10 +206,50 @@ class ContentHistory:
                     for digest, value in hashes.items()
                     if re.fullmatch(r"[0-9a-f]{64}", str(digest)) and isinstance(value, dict)
                 }
+                assets = payload.get("mediaAssets") if isinstance(payload, dict) else None
+                if isinstance(assets, dict):
+                    self._assets = {
+                        str(asset): str(viewkey)
+                        for asset, viewkey in assets.items()
+                        if re.fullmatch(r"\d+", str(asset)) and str(viewkey)
+                    }
                 return
         except (OSError, UnicodeError, json.JSONDecodeError):
             pass
         self._bootstrap_from_logs()
+
+    def _backfill_assets(self, media_cache: Path | None) -> None:
+        """Seed the media-id index from links already cached for past downloads.
+
+        Without this the cheap gate would only protect videos fetched after the
+        index was introduced, leaving every earlier download to be re-fetched in
+        full before the SHA-256 gate could notice.
+        """
+        if media_cache is None or not self._items:
+            return
+        try:
+            payload = json.loads(media_cache.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return
+        rows = payload.get("videos") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return
+        downloaded = {str(row.get("viewkey") or "") for row in self._items.values()}
+        downloaded.discard("")
+        added = False
+        with self._lock:
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                viewkey = str(row.get("viewkey") or "")
+                if viewkey not in downloaded:
+                    continue
+                asset = media_asset_id(str(row.get("media_url") or ""))
+                if asset and asset not in self._assets:
+                    self._assets[asset] = viewkey
+                    added = True
+            if added:
+                self._persist()
 
     def _bootstrap_from_logs(self) -> None:
         if self.path is None:
@@ -227,13 +283,40 @@ class ContentHistory:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(
-            json.dumps({"version": 1, "hashes": self._items}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                {"version": 2, "hashes": self._items, "mediaAssets": self._assets},
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
             encoding="utf-8",
         )
         os.chmod(temporary, 0o600)
         os.replace(temporary, self.path)
 
-    def claim(self, digest: str, viewkey: str, total_bytes: int) -> str | None:
+    def media_asset_owner(self, asset_id: str, viewkey: str) -> str | None:
+        """Name the viewkey that already downloaded this exact media file.
+
+        This is a read-only check on purpose: recording happens only once a
+        transfer succeeds, so a failed or blocked attempt can never lock a video
+        out of a later retry.
+        """
+        if not asset_id:
+            return None
+        with self._lock:
+            owner = str(self._assets.get(asset_id) or "")
+        return owner if owner and owner != viewkey else None
+
+    def adopt_media_asset(self, asset_id: str, viewkey: str) -> None:
+        """Attribute a media id to the viewkey whose bytes are actually in staging."""
+        if not asset_id or not viewkey:
+            return
+        with self._lock:
+            if self._assets.get(asset_id) == viewkey:
+                return
+            self._assets[asset_id] = viewkey
+            self._persist()
+
+    def claim(self, digest: str, viewkey: str, total_bytes: int, asset_id: str = "") -> str | None:
         """Reserve a content hash, returning the first viewkey when it is duplicate."""
         with self._lock:
             existing = self._items.get(digest)
@@ -245,6 +328,8 @@ class ContentHistory:
                 "bytes": total_bytes,
                 "recordedAt": _iso_now(),
             }
+            if asset_id:
+                self._assets.setdefault(asset_id, viewkey)
             self._persist()
             return None
 
@@ -642,21 +727,34 @@ def _finalize_verified_partial(
     content_history: ContentHistory | None,
 ) -> dict[str, object]:
     digest, total_bytes = _hash_file(partial)
-    duplicate_of = content_history.claim(digest, item["viewkey"], total_bytes) if content_history else None
+    duplicate_of = (
+        content_history.claim(digest, item["viewkey"], total_bytes, media_asset_id(item["media_url"]))
+        if content_history
+        else None
+    )
     elapsed = max(0.001, time.monotonic() - started_at)
     if duplicate_of:
         _reset_partial(partial)
+        # Point this media id at the original so a third listing of the same
+        # upload is stopped by the cheap gate instead of paying for the bytes again.
+        if content_history is not None:
+            content_history.adopt_media_asset(media_asset_id(item["media_url"]), duplicate_of)
         return {
             "viewkey": item["viewkey"],
             "status": "duplicate",
             "duplicate_of": duplicate_of,
             "bytes": total_bytes,
             "sha256": digest,
+            "detectedBy": "content-hash",
             "duration_s": round(elapsed, 1),
             "speed_bytes_s": round(total_bytes / elapsed, 1),
             "resumed": resumed,
         }
     _finalize_partial(partial, final)
+    # claim() only records the id alongside a *new* hash, so a re-download of the
+    # same viewkey would otherwise leave its media id outside the cheap gate.
+    if content_history is not None:
+        content_history.adopt_media_asset(media_asset_id(item["media_url"]), item["viewkey"])
     return {
         "viewkey": item["viewkey"],
         "status": "downloaded",
@@ -687,6 +785,20 @@ def download_one(
     started_at = time.monotonic()
     if final.exists() and final.stat().st_size > 0:
         return {"viewkey": item["viewkey"], "status": "skipped", "path": str(final), "bytes": final.stat().st_size}
+    # The same media file re-listed under a new viewkey used to be transferred in
+    # full and only then discarded by the SHA-256 gate.  The site's media id is
+    # already in the URL, so settle it before spending any bandwidth.
+    asset = media_asset_id(item["media_url"])
+    duplicate_of = content_history.media_asset_owner(asset, item["viewkey"]) if content_history else None
+    if duplicate_of:
+        return {
+            "viewkey": item["viewkey"],
+            "status": "duplicate",
+            "duplicate_of": duplicate_of,
+            "bytes": 0,
+            "mediaAsset": asset,
+            "detectedBy": "media-id",
+        }
     final.unlink(missing_ok=True)
     resumed_any = partial.exists() and partial.stat().st_size > 0
 
@@ -1306,7 +1418,7 @@ def main(argv: list[str] | None = None) -> int:
     results_lock = threading.Lock()
     limiter = RateLimiter(args.delay)
     resolver_limiter = RateLimiter(max(2.0, args.delay))
-    content_history = ContentHistory(args.content_history)
+    content_history = ContentHistory(args.content_history, args.media_cache)
 
     def process_item(item: dict[str, str]) -> None:
         result: dict[str, object]

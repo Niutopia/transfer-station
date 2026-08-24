@@ -756,6 +756,7 @@ class CrawlerTests(unittest.TestCase):
                 viewkey="original",
                 canonical_url="https://91porn.com/view_video.php?viewkey=original",
                 thumbnail_url="https://cdn.example.test/thumb/1227001.jpg",
+                asset_id="1227001",
             )
         }
         assets = crawler.successful_asset_identifiers(history, {"original"})
@@ -764,8 +765,29 @@ class CrawlerTests(unittest.TestCase):
             viewkey="replacement",
             canonical_url="https://91porn.com/view_video.php?viewkey=replacement",
             thumbnail_url="https://cdn.example.test/thumb/1227001.jpg",
+            asset_id="1227001",
         )
-        self.assertIn(crawler.media_asset_identifier(current.thumbnail_url), assets)
+        self.assertTrue(current.consistent_asset())
+        self.assertIn(current.asset_id, assets)
+
+    def test_asset_identity_ignores_a_card_that_disagrees_with_itself(self) -> None:
+        """A borrowed thumbnail must not retire a different video sight unseen."""
+        history = {
+            "original": crawler.Video(
+                viewkey="original",
+                canonical_url="https://91porn.com/view_video.php?viewkey=original",
+                thumbnail_url="https://cdn.example.test/thumb/1227001.jpg",
+                asset_id="1227004",
+            )
+        }
+        self.assertEqual(crawler.successful_asset_identifiers(history, {"original"}), set())
+        neighbour = crawler.Video(
+            viewkey="neighbour",
+            canonical_url="https://91porn.com/view_video.php?viewkey=neighbour",
+            thumbnail_url="https://cdn.example.test/thumb/1227001.jpg",
+            asset_id="1227009",
+        )
+        self.assertFalse(neighbour.consistent_asset())
 
     def test_asset_duplicate_viewkey_can_be_persisted_as_success(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1490,6 +1512,69 @@ class CrawlerTests(unittest.TestCase):
             self.assertEqual(result["duplicate_of"], "abc12345")
             self.assertFalse((output / "xyz98765.mp4").exists())
             self.assertEqual(list(partials.iterdir()), [])
+
+    def test_repeat_media_id_is_dropped_before_any_bytes_move(self) -> None:
+        """The requirement is one download per video, so a known media id costs nothing."""
+        item = {
+            "viewkey": "xyz98765",
+            "media_url": "https://la.example.test/mp43/1235730.mp4?st=fresh",
+            "canonical_url": "https://91porn.com/view_video.php?viewkey=xyz98765",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            partials = root / "partials"
+            output.mkdir()
+            partials.mkdir()
+            history = download.ContentHistory(root / "content.json")
+            digest = hashlib.sha256(b"first-copy").hexdigest()
+            self.assertIsNone(history.claim(digest, "abc12345", 10, "1235730"))
+            opener = mock.Mock()
+            result = download.download_one(
+                opener,
+                item,
+                output,
+                partials,
+                timeout=1,
+                max_bytes=1024 * 1024,
+                content_history=history,
+            )
+            self.assertEqual(result["status"], "duplicate")
+            self.assertEqual(result["duplicate_of"], "abc12345")
+            self.assertEqual(result["bytes"], 0)
+            self.assertEqual(result["detectedBy"], "media-id")
+            opener.open.assert_not_called()
+            self.assertFalse((output / "xyz98765.mp4").exists())
+
+    def test_media_id_index_is_seeded_from_cached_links_of_past_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            digest = hashlib.sha256(b"earlier").hexdigest()
+            (root / "content.json").write_text(json.dumps({
+                "version": 1,
+                "hashes": {digest: {"viewkey": "abc12345", "bytes": 7}},
+            }), encoding="utf-8")
+            (root / "video-history.json").write_text(json.dumps({
+                "videos": [
+                    {"viewkey": "abc12345", "media_url": "https://la.example.test/mp43/1235730.mp4?st=x"},
+                    {"viewkey": "never12345", "media_url": "https://la.example.test/mp43/1299999.mp4?st=y"},
+                ],
+            }), encoding="utf-8")
+            history = download.ContentHistory(root / "content.json", root / "video-history.json")
+            self.assertEqual(history.media_asset_owner("1235730", "xyz98765"), "abc12345")
+            self.assertIsNone(history.media_asset_owner("1299999", "xyz98765"))
+            self.assertIsNone(history.media_asset_owner("1235730", "abc12345"))
+            persisted = json.loads((root / "content.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["mediaAssets"], {"1235730": "abc12345"})
+
+    def test_checking_a_media_id_never_locks_it_against_a_later_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            history = download.ContentHistory(root / "content.json")
+            self.assertIsNone(history.media_asset_owner("1235730", "xyz98765"))
+            digest = hashlib.sha256(b"eventually").hexdigest()
+            self.assertIsNone(history.claim(digest, "xyz98765", 10, "1235730"))
+            self.assertEqual(history.media_asset_owner("1235730", "other"), "xyz98765")
 
     def test_download_progress_tracks_active_files_and_completion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
