@@ -1528,7 +1528,50 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(body, "<html>ok</html>")
         self.assertEqual(opener.open.call_count, 2)
 
-    def test_fetch_html_identifies_cloudflare_challenge_from_real_crawl_response(self) -> None:
+    def test_fetch_html_identifies_a_challenge_served_as_503(self) -> None:
+        # Cloudflare also answers with 429/503.  Reading the body only for 403
+        # also skipped the cf-mitigated header check, so a challenged 503 looked
+        # like a retryable upstream error and never raised the auth signal.
+        headers = Message()
+        headers["Content-Type"] = "text/html; charset=utf-8"
+        headers["cf-mitigated"] = "challenge"
+        opener = mock.Mock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            "https://91porn.com/v.php", 503, "unavailable", headers, io.BytesIO(b"<html>blocked</html>"),
+        )
+        with mock.patch.object(crawler.time, "sleep"), mock.patch.object(crawler.random, "uniform", return_value=0):
+            with self.assertRaises(crawler.CloudflareChallengeError):
+                crawler.fetch_html(opener, "https://91porn.com/v.php", timeout=1, user_agent="test", retries=1)
+        self.assertEqual(opener.open.call_count, 1)
+
+    def test_download_failure_kinds_follow_the_exception_type(self) -> None:
+        cases = (
+            (crawler.MediaMismatchError("详情页媒体与榜单不一致（viewkey=abc12345）"), "media_mismatch", True),
+            (crawler.MediaUnavailableError("详情页没有可下载媒体"), "media_unavailable", True),
+            (crawler.CloudflareChallengeError("Cloudflare Challenge: /view_video.php"), "auth_challenge", False),
+            (download.DownloadError("连接被重置"), "download_error", False),
+        )
+        for exc, kind, safe in cases:
+            with self.subTest(kind=kind):
+                self.assertEqual(download.failure_kind(exc), kind)
+                self.assertEqual(kind in download.SAFE_BLOCK_KINDS, safe)
+                # The same verdict must survive the auto-refresh wrapper.
+                self.assertEqual(download.failure_kind(download.AutoRefreshExhausted(exc, 2)), kind)
+        self.assertTrue(download.is_media_mismatch_error(crawler.MediaMismatchError("详情页媒体与榜单不一致")))
+        self.assertFalse(download.is_media_mismatch_error(crawler.MediaUnavailableError("没有媒体")))
+
+    def test_dead_media_routes_fail_the_queue_once(self) -> None:
+        items = [{"viewkey": "abc12345", "canonical_url": "https://91porn.com/view_video.php?viewkey=abc12345",
+                  "media_url": "https://cdn.example/abc12345.mp4"}]
+        with mock.patch.object(download, "refresh_media", side_effect=crawler.CloudflareChallengeError("Cloudflare Challenge: /x")), \
+             mock.patch.object(download, "probe_media", return_value=(0.0, 0)), \
+             mock.patch.object(download, "set_dl_progress_route"), \
+             mock.patch.object(download, "set_dl_progress_stage"):
+            with self.assertRaises(download.RouteProbeFailed) as raised:
+                download.select_download_route(items, "http://proxy.local:7897", timeout=5, retries=0)
+        self.assertIn("auth_challenge", raised.exception.kinds)
+        self.assertTrue(raised.exception.record.get("routesDead"))
+
         response = FakeResponse(
             b"<html><title>Just a moment</title><script src='/cdn-cgi/challenge-platform/x'></script></html>",
             headers={"Content-Type": "text/html; charset=utf-8"},

@@ -117,6 +117,46 @@ class AuthCookieControlTests(unittest.TestCase):
             )
             self.assertTrue(status["valid"])
 
+    def test_challenged_manual_crawl_marks_cookie_invalid_whatever_the_label(self) -> None:
+        # With the listing pages cached a challenged run still exits 0, so keying
+        # the verdict on resultStatus == "failed" made this signal unreachable.
+        cases = (
+            {"resultStatus": "attention", "authFailure": True, "crawlExitCode": 0, "detailPagesRequested": 6},
+            {"resultStatus": "success", "authFailure": False, "authChallenges": 5, "crawlExitCode": 0, "detailPagesRequested": 6},
+        )
+        for event in cases:
+            with self.subTest(event=event):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    cookie_path = root / "auth-cookie.txt"
+                    user_agent_path = root / "auth-user-agent.txt"
+                    cookie_path.write_text("cf_clearance=present\n", encoding="utf-8")
+                    user_agent_path.write_text("Mozilla/5.0 Edg/150.0.0.0\n", encoding="utf-8")
+                    status = auth_cookie.validate_stored_profile(
+                        cookie_path, user_agent_path, latest_manual_crawl=event,
+                    )
+                    self.assertFalse(status["valid"])
+                    self.assertIn("Cloudflare", str(status["error"]))
+
+    def test_listing_only_crawl_does_not_confirm_the_cookie(self) -> None:
+        # Exit code 0 only proves the listing crawl ran; nothing exercised the
+        # credential, so the honest answer is "unconfirmed", not "可用".
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cookie_path = root / "auth-cookie.txt"
+            user_agent_path = root / "auth-user-agent.txt"
+            cookie_path.write_text("cf_clearance=present\n", encoding="utf-8")
+            user_agent_path.write_text("Mozilla/5.0 Edg/150.0.0.0\n", encoding="utf-8")
+            status = auth_cookie.validate_stored_profile(
+                cookie_path,
+                user_agent_path,
+                latest_manual_crawl={
+                    "resultStatus": "success", "authFailure": False, "authChallenges": 0,
+                    "crawlExitCode": 0, "detailPagesRequested": 0,
+                },
+            )
+            self.assertIsNone(status["valid"])
+
     def test_locally_invalid_stored_profile_still_requires_update(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -768,9 +768,14 @@ def fetch_html(
         except urllib.error.HTTPError as exc:
             status_code = exc.code
             response_headers = exc.headers
-            error_body = exc.read(64 * 1024) if status_code == 403 else b""
+            # Cloudflare also serves the interstitial as 429/503, and the
+            # cf-mitigated header alone is enough to identify it.  Reading the
+            # body only for 403 let a challenged 503 look like a retryable
+            # upstream error, so no auth signal ever reached the dashboard.
+            challenge_status = status_code in {403, 429, 503}
+            error_body = exc.read(64 * 1024) if challenge_status else b""
             exc.close()
-            if status_code == 403 and is_cloudflare_challenge(error_body, response_headers):
+            if challenge_status and is_cloudflare_challenge(error_body, response_headers):
                 raise CloudflareChallengeError(f"Cloudflare Challenge: {path}") from exc
             retryable = status_code in {408, 425, 429, 500, 502, 503, 504}
             if not retryable or attempt >= retries:
@@ -1166,7 +1171,9 @@ def main(argv: list[str] | None = None) -> int:
                 "listingFailures": len(listing_failures),
             })
     if not page_results:
-        auth_failure = bool(listing_failures) and all(item.get("kind") == "auth_challenge" for item in listing_failures)
+        # One challenged page already proves the stored clearance is not working;
+        # requiring every listing failure to be a challenge hid the mixed case.
+        auth_failure = any(item.get("kind") == "auth_challenge" for item in listing_failures)
         write_progress_state(args.progress, {
             "stage": "failed",
             "phase": "listing",

@@ -285,13 +285,31 @@ def validate_stored_profile(
         message = str(exc) if isinstance(exc, AuthCookieError) else "Cookie 配置无法读取"
         return auth_cookie_status(cookie_path, user_agent_path, valid=False, error=message)
     if isinstance(latest_manual_crawl, dict):
-        if latest_manual_crawl.get("resultStatus") == "failed" and latest_manual_crawl.get("authFailure") is True:
+        # A Cloudflare challenge invalidates the credential no matter how the run
+        # was labelled overall: with the listing pages cached a challenged run
+        # still exits 0, and keying on resultStatus == "failed" made the whole
+        # signal unreachable.
+        if latest_manual_crawl.get("authFailure") is True:
             return auth_cookie_status(
                 cookie_path,
                 user_agent_path,
                 valid=False,
                 error="上次手动抓取被 Cloudflare 拦截",
             )
+        challenges = latest_manual_crawl.get("authChallenges")
+        if isinstance(challenges, int) and not isinstance(challenges, bool) and challenges > 0:
+            return auth_cookie_status(
+                cookie_path,
+                user_agent_path,
+                valid=False,
+                error="上次手动抓取有详情页被 Cloudflare 拦截",
+            )
+        detail_pages = latest_manual_crawl.get("detailPagesRequested")
         if latest_manual_crawl.get("crawlExitCode") == 0:
-            return auth_cookie_status(cookie_path, user_agent_path, valid=True)
+            # Only detail pages actually exercise the credential.  A listing-only
+            # run proves nothing, so it stays "unknown" rather than "valid".
+            if detail_pages is None:
+                return auth_cookie_status(cookie_path, user_agent_path, valid=True)
+            if isinstance(detail_pages, int) and not isinstance(detail_pages, bool) and detail_pages > 0:
+                return auth_cookie_status(cookie_path, user_agent_path, valid=True)
     return auth_cookie_status(cookie_path, user_agent_path, valid=None)

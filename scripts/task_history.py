@@ -97,8 +97,7 @@ def latest_manual_crawl_event(path: Path) -> dict[str, object] | None:
             and (
                 event.get("crawlExitCode") == 0
                 or (
-                    event.get("resultStatus") == "failed"
-                    and event.get("authFailure") is True
+                    event.get("authFailure") is True
                     and isinstance(event.get("authDetectorVersion"), int)
                     and not isinstance(event.get("authDetectorVersion"), bool)
                     and event["authDetectorVersion"] >= 2

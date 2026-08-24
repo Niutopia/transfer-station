@@ -97,6 +97,21 @@ class TransientDownloadError(DownloadError):
         self.retry_after = retry_after
 
 
+class RouteProbeFailed(DownloadError):
+    """Neither the direct nor the proxy media route answered the probe."""
+
+    def __init__(self, record: dict[str, object]) -> None:
+        kinds = sorted({
+            str(value.get("kind"))
+            for value in record.values()
+            if isinstance(value, dict) and value.get("kind")
+        })
+        self.record = record
+        self.kinds = kinds
+        detail = f"（{', '.join(kinds)}）" if kinds else ""
+        super().__init__(f"直连与代理线路都无法下载媒体{detail}")
+
+
 class AutoRefreshExhausted(DownloadError):
     def __init__(self, cause: BaseException, attempts: int) -> None:
         super().__init__(str(cause))
@@ -104,8 +119,37 @@ class AutoRefreshExhausted(DownloadError):
         self.attempts = attempts
 
 
+SAFE_BLOCK_KINDS = frozenset({"media_mismatch", "media_unavailable"})
+
+
+def failure_kind(exc: BaseException) -> str:
+    """Classify a download failure the way the crawler classifies a resolve failure.
+
+    Matching on the Chinese message text recognised only the mismatch case, so a
+    detail page that exposes no media, or a Cloudflare challenge raised while
+    refreshing a link, was recorded as a hard failure: the run exited non-zero,
+    the key never reached blocked-media.json, and it stayed a repair candidate
+    for every later run.
+    """
+    cause = exc.cause if isinstance(exc, AutoRefreshExhausted) else exc
+    try:
+        import crawler
+    except ImportError:
+        crawler = None
+    if crawler is not None:
+        if isinstance(cause, crawler.CloudflareChallengeError):
+            return "auth_challenge"
+        if isinstance(cause, crawler.MediaMismatchError):
+            return "media_mismatch"
+        if isinstance(cause, crawler.MediaUnavailableError):
+            return "media_unavailable"
+    if "详情页媒体与榜单不一致" in str(cause):
+        return "media_mismatch"
+    return "download_error"
+
+
 def is_media_mismatch_error(exc: BaseException) -> bool:
-    return "详情页媒体与榜单不一致" in str(exc)
+    return failure_kind(exc) == "media_mismatch"
 
 
 class RateLimiter:
@@ -392,11 +436,12 @@ def ensure_public_endpoint(raw: str) -> str:
             endpoint = ipaddress.ip_address(address)
         except ValueError as exc:
             raise DownloadError("媒体域名返回了无效地址") from exc
-        if not endpoint.is_global:
-            if endpoint in PROXY_FAKE_IP_NETWORK and not trusted_proxy_fake_ip(parsed.hostname, endpoint):
-                raise RefreshableEndpointError("拒绝非公网媒体地址")
-            if not trusted_proxy_fake_ip(parsed.hostname, endpoint):
-                raise DownloadError("拒绝非公网媒体地址")
+        if not endpoint.is_global and not trusted_proxy_fake_ip(parsed.hostname, endpoint):
+            # A Fake-IP answer is a transient DNS/route state that one refresh may
+            # clear; any other reserved address is a hard stop.
+            if endpoint in PROXY_FAKE_IP_NETWORK:
+                raise RefreshableEndpointError("拒绝非公网媒体地址（代理 Fake-IP）")
+            raise DownloadError("拒绝非公网媒体地址")
     return raw
 
 
@@ -818,6 +863,7 @@ def refresh_media(
     *,
     opener: urllib.request.OpenerDirector | None = None,
     rate_limiter=None,
+    identity_attempts: int = 1,
 ) -> None:
     import crawler
 
@@ -837,6 +883,10 @@ def refresh_media(
         concurrency=1,
         retries=retries,
         rate_limiter=rate_limiter,
+        # Detail pages are the scarce, challenge-guarded resource.  Without this
+        # the refresh silently used the maximum three rechecks while the daily
+        # and repair paths deliberately cap them at one.
+        identity_attempts=identity_attempts,
     )
     if not video.media_url:
         raise DownloadError("重新解析后仍未找到媒体地址")
@@ -1001,7 +1051,12 @@ def probe_media(
     return received / elapsed, received
 
 
-def _route_probe_record(speed: float = 0.0, received: int = 0, error: str = "") -> dict[str, object]:
+def _route_probe_record(
+    speed: float = 0.0,
+    received: int = 0,
+    error: str = "",
+    kind: str = "",
+) -> dict[str, object]:
     record: dict[str, object] = {
         "ok": bool(speed > 0 and received >= MIN_ROUTE_PROBE_BYTES),
         "speedBytesS": round(speed, 1),
@@ -1009,7 +1064,17 @@ def _route_probe_record(speed: float = 0.0, received: int = 0, error: str = "") 
     }
     if error:
         record["error"] = error
+    if kind:
+        record["kind"] = kind
     return record
+
+
+def write_manifest(manifest: Path, results: list[dict[str, object]]) -> None:
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = manifest.with_suffix(manifest.suffix + ".tmp")
+    temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, manifest)
 
 
 def select_download_route(
@@ -1061,12 +1126,23 @@ def select_download_route(
             results[route.name] = _route_probe_record(speed, received)
         except Exception as exc:
             # Do not persist URLs or exception text (which may contain a
-            # signed query string); expose only a stable class label.
-            results[route.name] = _route_probe_record(error=type(exc).__name__)
+            # signed query string); expose only a stable class label plus the
+            # classified kind, so an expired credential is not reduced to an
+            # anonymous probe failure and a silent fallback to direct.
+            results[route.name] = _route_probe_record(
+                error=type(exc).__name__,
+                kind=failure_kind(exc),
+            )
         set_dl_progress_route(None, {**results, "chosen": None})
 
     direct_speed = float((results.get("direct") or {}).get("speedBytesS") or 0)
     proxy_speed = float((results.get("http-proxy") or {}).get("speedBytesS") or 0)
+    if direct_speed <= 0 and proxy_speed <= 0:
+        # Both routes are dead.  Say so instead of quietly returning "direct" and
+        # letting every item burn its own refresh/backoff ladder against it.
+        record = {**results, "chosen": direct.name, "routesDead": True}
+        set_dl_progress_route(direct.name, record)
+        raise RouteProbeFailed(record)
     proxy_wins = proxy_speed > 0 and (
         direct_speed <= 0 or proxy_speed >= direct_speed * ROUTE_PROXY_MIN_GAIN
     )
@@ -1185,14 +1261,32 @@ def main(argv: list[str] | None = None) -> int:
         # direct download task.
         print(f"[route] 忽略无效媒体代理配置: {exc}", file=sys.stderr)
         media_proxy = None
-    selected_route, route_probe, fresh_probe_item = select_download_route(
-        items,
-        media_proxy,
-        timeout=args.timeout,
-        retries=args.retries,
-        probe_bytes=args.route_probe_bytes,
-        probe_timeout=args.route_probe_timeout,
-    )
+    try:
+        selected_route, route_probe, fresh_probe_item = select_download_route(
+            items,
+            media_proxy,
+            timeout=args.timeout,
+            retries=args.retries,
+            probe_bytes=args.route_probe_bytes,
+            probe_timeout=args.route_probe_timeout,
+        )
+    except RouteProbeFailed as exc:
+        # Fail the queue once, with the real reason, instead of letting every
+        # item rediscover the same dead route through its own backoff ladder.
+        kind = exc.kinds[0] if exc.kinds else "download_error"
+        results = [
+            {
+                "viewkey": item.get("viewkey"),
+                "status": "failed",
+                "error": str(exc),
+                "kind": kind,
+            }
+            for item in items
+        ]
+        finish_dl_progress(True)
+        write_manifest(manifest, results)
+        print(f"[route] {exc}", file=sys.stderr)
+        return 1
     set_dl_progress_stage("downloading")
     if fresh_probe_item and selected_route.name == "direct":
         # Reuse the already-fresh direct URL for the first item only; all
@@ -1234,21 +1328,29 @@ def main(argv: list[str] | None = None) -> int:
                 content_history=content_history,
             )
         except AutoRefreshExhausted as exc:
+            kind = failure_kind(exc)
+            blocked = kind in SAFE_BLOCK_KINDS
             result = {
                 "viewkey": item.get("viewkey"),
-                "status": "failed",
+                "status": "blocked" if blocked else "failed",
                 "error": str(exc.cause),
+                "kind": kind,
                 "autoRetries": exc.attempts,
             }
+            if blocked:
+                item["media_url"] = ""
+                item["resolved_at"] = ""
             print(f"[{item.get('viewkey')}] error: {exc.cause}", file=sys.stderr)
         except Exception as exc:
-            mismatch = is_media_mismatch_error(exc)
+            kind = failure_kind(exc)
+            blocked = kind in SAFE_BLOCK_KINDS
             result = {
                 "viewkey": item.get("viewkey"),
-                "status": "blocked" if mismatch else "failed",
+                "status": "blocked" if blocked else "failed",
                 "error": str(exc),
+                "kind": kind,
             }
-            if mismatch:
+            if blocked:
                 item["media_url"] = ""
                 item["resolved_at"] = ""
             print(f"[{item.get('viewkey')}] error: {exc}", file=sys.stderr)
@@ -1271,10 +1373,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     blocked_keys.discard("")
     finish_dl_progress(failed)
-    temporary = manifest.with_suffix(manifest.suffix + ".tmp")
-    temporary.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(temporary, 0o600)
-    os.replace(temporary, manifest)
+    write_manifest(manifest, results)
     update_media_cache(args.media_cache, items, blocked_keys)
     if blocked_keys and args.blocked_history:
         import crawler
@@ -1291,7 +1390,10 @@ def main(argv: list[str] | None = None) -> int:
         failures = [
             {
                 "viewkey": str(result.get("viewkey") or ""),
-                "kind": "media_mismatch",
+                # Keep the classifier's verdict: hardcoding one kind made a
+                # missing player indistinguishable from a listing mismatch in the
+                # history that later crawls read back.
+                "kind": str(result.get("kind") or "media_mismatch"),
                 "error": str(result.get("error") or ""),
             }
             for result in results

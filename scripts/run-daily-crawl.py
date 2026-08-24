@@ -25,7 +25,7 @@ DAILY_CONFIG = PROJECT / "config" / "daily-sources.json"
 RUN_HISTORY = DATA / "run-history.jsonl"
 REFRESH_MONITOR = PROJECT / "scripts" / "refresh-monitor.py"
 SAFE_RESOLVE_FAILURE_KINDS = {"media_mismatch", "media_unavailable"}
-AUTH_DETECTOR_VERSION = 2
+AUTH_DETECTOR_VERSION = 3
 
 
 def run_logged(command: list[str], log_path: Path) -> int:
@@ -194,6 +194,10 @@ def main() -> int:
     downloaded_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "downloaded")
     duplicate_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "duplicate")
     failed_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "failed")
+    # download.py reports "skipped" when the target file is already in place.
+    # Those items are handled, so they need their own bucket; leaving them out of
+    # every bucket made a fully successful re-run look like it ingested nothing.
+    already_present_videos = sum(1 for item in manifest_results if isinstance(item, dict) and item.get("status") == "skipped")
     auto_retry_attempts = sum(
         int(item.get("autoRetries") or 0)
         for item in manifest_results
@@ -235,15 +239,25 @@ def main() -> int:
     if crawl_code != 0:
         listing_failure_count = int(crawl_progress_payload.get("listingFailures") or listing_failure_count)
     downloaded_bytes = sum(int(item.get("bytes") or 0) for item in manifest_results if isinstance(item, dict) and item.get("status") == "downloaded")
-    task_succeeded = crawl_code == 0 and download_code in {0, None} and resolver_failed_videos == 0
-    unsafe_resolve_failures = [item for item in resolve_failures if not is_safe_resolve_failure(item)]
-    auth_failure = bool(crawl_progress_payload.get("authFailure"))
-    if unsafe_resolve_failures:
-        auth_failure = auth_failure or all(
-            isinstance(item, dict) and item.get("kind") == "auth_challenge"
-            for item in unsafe_resolve_failures
+    # A resolver error does not undo the run: the listing crawl still produced a
+    # usable snapshot and the download stage still ran, so it belongs in
+    # "attention" rather than turning the whole run into a failure.
+    task_succeeded = crawl_code == 0 and download_code in {0, None}
+    auth_challenges = sum(
+        1 for item in resolve_failures
+        if isinstance(item, dict) and item.get("kind") == "auth_challenge"
+    )
+    # A partly challenged listing never reaches the crawler's own authFailure
+    # flag, because that flag is only written when *every* listing page fails.
+    if isinstance(listing_failures, list):
+        auth_challenges += sum(
+            1 for item in listing_failures
+            if isinstance(item, dict) and item.get("kind") == "auth_challenge"
         )
-    auth_failure = bool(not task_succeeded and auth_failure)
+    # One challenged page already means the stored clearance is not working.
+    # Requiring *every* failure to be a challenge hid the common mixed case
+    # (some pages challenged, one page timing out) that this signal exists for.
+    auth_failure = bool(crawl_progress_payload.get("authFailure")) or auth_challenges > 0
     event = {
         "timestamp": task_finished_at.isoformat(timespec="seconds"),
         "startedAt": task_started_at.isoformat(timespec="seconds"),
@@ -251,8 +265,13 @@ def main() -> int:
         "taskType": "crawl",
         "trigger": args.trigger,
         "authFailure": auth_failure,
+        "authChallenges": auth_challenges,
         "authDetectorVersion": AUTH_DETECTOR_VERSION,
-        "resultStatus": "attention" if task_succeeded and listing_failure_count else "success" if task_succeeded else "failed",
+        "resultStatus": (
+            "failed" if not task_succeeded
+            else "attention" if (listing_failure_count or resolver_failed_videos or auth_failure)
+            else "success"
+        ),
         "crawlExitCode": crawl_code,
         "downloadExitCode": download_code,
         "downloadRequested": args.download,
@@ -265,6 +284,8 @@ def main() -> int:
         "newVideos": int(pending_metadata.get("new_videos") or 0),
         "retryVideos": int(pending_metadata.get("retry_videos") or 0),
         "downloadedVideos": downloaded_videos,
+        "alreadyPresentVideos": already_present_videos,
+        "detailPagesRequested": int(pending_metadata.get("detail_pages_requested") or 0),
         "duplicateVideos": duplicate_videos,
         "blockedVideos": blocked_videos,
         "ignoredVideos": int(pending_metadata.get("ignored_videos") or 0),
