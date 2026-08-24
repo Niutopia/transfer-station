@@ -7,9 +7,15 @@ import html
 import json
 import os
 import shutil
+import sys
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parents[1] / "public-video-crawler"))
+# Share the crawler's definition of a safe block instead of re-typing the set in
+# every consumer; the copies had already drifted apart.
+from crawler import BLOCKED_MEDIA_FAILURE_KINDS as SAFE_BLOCK_KINDS
 
 from download_history import sync_download_history
 from task_lock import lock_is_active, read_lock
@@ -23,6 +29,7 @@ CRAWL_JSON = CRAWLER / "videos-with-media.json"
 DAILY_CONFIG = PROJECT / "config" / "daily-sources.json"
 DATA = PROJECT / "data"
 DOWNLOAD_MANIFEST = DATA / "download-manifest.json"
+REPAIR_MANIFEST = DATA / "repair-download-manifest.json"
 IGNORED_MEDIA = DATA / "ignored-media.json"
 PARTIAL_DIR = DATA / "partials"
 OUTPUT = PROJECT / "public" / "status.json"
@@ -186,14 +193,10 @@ def main() -> int:
         if isinstance(item, dict)
         and item.get("viewkey")
         and (
-            item.get("kind") in {"media_mismatch", "media_unavailable"}
+            item.get("kind") in SAFE_BLOCK_KINDS
             or "详情页媒体与榜单不一致" in str(item.get("error") or "")
         )
     }
-    unresolved_keys = listed_keys - resolved_keys - ignored_keys
-    blocked_keys = unresolved_keys & blocked_failure_keys
-    unresolved_error_keys = unresolved_keys - blocked_keys
-    blocked_count = len(blocked_keys)
     total_bytes = sum(item["sizeBytes"] for item in files)
     today = now.date()
     current_today_files = [item for item in files if datetime.fromtimestamp(item["timestamp"]).astimezone().date() == today]
@@ -228,38 +231,63 @@ def main() -> int:
     latest_event_listing_failures = event_counter(latest_event, "listingFailures")
     latest_crawl_at = str((latest_crawl_event or {}).get("timestamp") or snapshot_updated_at or "") or None
     latest_repair_at = str((latest_repair_event or {}).get("timestamp") or "") or None
-    # Failed attempts do not refresh the crawl snapshot. Its own mtime is the
-    # truthful freshness signal; using the latest attempt hid stale data.
-    crawl_age_hours = hours_since(snapshot_updated_at, now)
+    # Failed attempts do not refresh the crawl snapshot, but a repair rewrites
+    # that same file, which reset its mtime and hid a stale inventory for as long
+    # as the user kept clicking 复核.  Use the newest crawl that actually produced
+    # data and fall back to the file only when no such event exists yet.
+    latest_completed_crawl = latest_task_event(RUN_HISTORY, "crawl", statuses={"success", "attention"})
+    crawl_age_hours = hours_since(
+        str((latest_completed_crawl or {}).get("timestamp") or "") or snapshot_updated_at,
+        now,
+    )
 
-    manifest = load_json(DOWNLOAD_MANIFEST, [])
-    manifest_failures = []
-    manifest_blocked_keys: set[str] = set()
-    if isinstance(manifest, list):
-        manifest_blocked_keys = {
-            str(item.get("viewkey") or "")
-            for item in manifest
-            if isinstance(item, dict)
-            and (
-                item.get("status") == "blocked"
-                or (
-                    item.get("status") == "failed"
-                    and "详情页媒体与榜单不一致" in str(item.get("error") or "")
-                )
-            )
-        }
-        manifest_blocked_keys.discard("")
-        manifest_failures = [
-            item
-            for item in manifest
-            if isinstance(item, dict)
-            and item.get("status") == "failed"
-            and str(item.get("viewkey") or "") not in manifest_blocked_keys
-        ]
-    blocked_keys.update(listed_keys & manifest_blocked_keys)
+    # The repair task writes its own manifest, so reading only the crawl one made
+    # every repair-phase failure and safe block invisible to the overview.
+    manifest_sources = []
+    for path in (DOWNLOAD_MANIFEST, REPAIR_MANIFEST):
+        rows = load_json(path, [])
+        if isinstance(rows, list) and rows:
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                stamp = 0.0
+            manifest_sources.append((stamp, rows))
+    manifest_rows = [row for _stamp, rows in manifest_sources for row in rows if isinstance(row, dict)]
+    # "最近下载" means the newer of the two runs, not both concatenated.
+    latest_manifest_rows = [
+        row
+        for row in (max(manifest_sources, key=lambda entry: entry[0])[1] if manifest_sources else [])
+        if isinstance(row, dict)
+    ]
+
+    def manifest_block_kind(row: dict[str, object]) -> str:
+        kind = str(row.get("kind") or "")
+        if kind in SAFE_BLOCK_KINDS:
+            return kind
+        if "详情页媒体与榜单不一致" in str(row.get("error") or ""):
+            return "media_mismatch"
+        return ""
+
+    manifest_blocked_kinds = {
+        str(row.get("viewkey") or ""): kind
+        for row in manifest_rows
+        if row.get("status") in {"blocked", "failed"} and (kind := manifest_block_kind(row))
+        and (row.get("status") == "blocked" or kind == "media_mismatch")
+    }
+    manifest_blocked_kinds.pop("", None)
+    manifest_blocked_keys = set(manifest_blocked_kinds)
+    manifest_failures = [
+        row
+        for row in latest_manifest_rows
+        if row.get("status") == "failed"
+        and str(row.get("viewkey") or "") not in manifest_blocked_keys
+    ]
     unresolved_keys = listed_keys - resolved_keys - ignored_keys
-    blocked_keys &= unresolved_keys
-    unresolved_error_keys = unresolved_keys - blocked_keys
+    # A resolver block only counts while the item still has no media URL.  A
+    # download-phase block is confirmed by the manifest even though the snapshot
+    # still carries the URL that produced it, so intersecting it away left a
+    # confirmed mismatch with no alert, no count, and a re-queue on every 复核.
+    blocked_keys = (unresolved_keys & blocked_failure_keys) | ((listed_keys & manifest_blocked_keys) - ignored_keys)
     blocked_count = len(blocked_keys)
 
     # The snapshot is a long-lived inventory, while a crawl event only covers
@@ -312,18 +340,34 @@ def main() -> int:
             "detail": f"本次有 {listing_failure_count} 个列表页未成功读取，其余成功页面已保留。",
         })
     if blocked_count:
-        mismatch_count = sum(
-            1 for item in resolve_failures
-            if isinstance(item, dict)
-            and str(item.get("viewkey") or "") in blocked_keys
-            and item.get("kind") == "media_mismatch"
-        )
-        unavailable_count = blocked_count - mismatch_count
+        # Classify each blocked key by its own recorded kind.  Subtracting a count
+        # of resolver rows from a count of blocked keys mixed two populations, so
+        # download-phase mismatches were reported as "没有可下载媒体".
+        blocked_kinds: dict[str, str] = {}
+        for item in resolve_failures:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("viewkey") or "")
+            if key not in blocked_keys or key in blocked_kinds:
+                continue
+            kind = str(item.get("kind") or "")
+            if kind not in SAFE_BLOCK_KINDS and "详情页媒体与榜单不一致" in str(item.get("error") or ""):
+                kind = "media_mismatch"
+            if kind in SAFE_BLOCK_KINDS:
+                blocked_kinds[key] = kind
+        for key, kind in manifest_blocked_kinds.items():
+            if key in blocked_keys:
+                blocked_kinds.setdefault(key, kind)
+        mismatch_count = sum(1 for kind in blocked_kinds.values() if kind == "media_mismatch")
+        unavailable_count = sum(1 for kind in blocked_kinds.values() if kind == "media_unavailable")
+        unclassified_count = max(0, blocked_count - mismatch_count - unavailable_count)
         reasons = []
         if mismatch_count:
             reasons.append(f"{mismatch_count} 个播放器资源与榜单不一致")
         if unavailable_count:
             reasons.append(f"{unavailable_count} 个详情页没有可下载媒体")
+        if unclassified_count:
+            reasons.append(f"{unclassified_count} 个此前已确认不可用")
         alerts.append({
             "level": "success",
             "title": f"已安全跳过 {blocked_count} 个不可用媒体",
@@ -452,29 +496,44 @@ def main() -> int:
         alert.get("scope") != "backlog" and alert.get("level") in {"warning", "error"}
         for alert in alerts
     )
+    inventory_handled = not unique_videos or handled_download_count == unique_videos
     if is_crawling:
         run_status = "active"
-    elif latest_event_status == "success" and not has_attention:
+    elif latest_event_type == "crawl" and latest_event_status == "success" and not has_attention:
         # A successful new-only crawl is ready even when the inventory still
         # has an explicit, separately actionable repair backlog.
         run_status = "ready"
-    elif latest_event_status == "none" and unique_videos and handled_download_count == unique_videos and not has_attention:
+    elif latest_event_status == "success" and not has_attention and inventory_handled:
+        # A repair alone only means "ready" once the backlog it works on is
+        # actually cleared; it says nothing about the listing being current.
+        run_status = "ready"
+    elif latest_event_status == "none" and unique_videos and inventory_handled and not has_attention:
         run_status = "ready"
     else:
         run_status = "attention"
     completed_run = latest_successful_daily_run(RUN_HISTORY, today=today)
+    # Whether today's daily task finished is a property of that run, not of
+    # whatever ran most recently: appending a repair afterwards used to clear the
+    # flag even though the crawl had completed successfully.
     completed_today = bool(
         completed_run
         and not is_crawling
-        and latest_event_type == "crawl"
-        and latest_event_status == "success"
         and not partials
         and not current_unresolved_error_keys
-        and latest_event_listing_failures == 0
+        and event_counter(completed_run, "listingFailures") == 0
         and not unresolved_manifest_failures
     )
     failed_crawl = not is_crawling and latest_event_type == "crawl" and latest_event_status == "failed"
     if failed_crawl:
+        # A failed run is not the same as a run that never got anywhere.  Blanking
+        # these two stages contradicted the very same event's counters, which the
+        # UI printed right next to them.
+        failed_attempted = event_counter(latest_event, "newVideos") + event_counter(latest_event, "retryVideos")
+        failed_blocked = event_counter(latest_event, "blockedVideos")
+        failed_failed = event_counter(latest_event, "failedVideos")
+        failed_downloaded = event_counter(latest_event, "downloadedVideos")
+        failed_present = event_counter(latest_event, "alreadyPresentVideos")
+        failed_ingested = failed_downloaded + failed_present
         stages = [
             {
                 "name": "列表抓取",
@@ -482,9 +541,26 @@ def main() -> int:
                 "value": latest_result_raw_links,
                 "note": f"{latest_event_listing_failures} 个页面失败" if latest_event_listing_failures else "任务未完成",
             },
-            {"name": "去重", "status": "waiting", "value": latest_result_unique, "note": "等待榜单抓取成功"},
-            {"name": "媒体解析", "status": "waiting", "value": 0, "note": "本次未进入该阶段"},
-            {"name": "下载入库", "status": "waiting", "value": 0, "note": "本次未进入该阶段"},
+            {
+                "name": "去重",
+                "status": "done" if latest_result_raw_links else "waiting",
+                "value": latest_result_unique,
+                "note": f"移除 {duplicates} 个重复" if latest_result_raw_links else "等待榜单抓取成功",
+            },
+            {
+                "name": "媒体解析",
+                "status": "attention" if failed_attempted else "waiting",
+                "value": max(0, failed_attempted - failed_blocked - failed_failed),
+                "note": f"本次处理 {failed_attempted} 个详情后中断" if failed_attempted else "本次未进入该阶段",
+            },
+            {
+                "name": "下载入库",
+                "status": "attention" if failed_ingested else "waiting",
+                "value": failed_ingested,
+                "note": f"中断前已入库 {failed_downloaded}，{failed_present} 个文件已存在" if failed_present else (
+                    f"中断前已入库 {failed_downloaded}" if failed_ingested else "本次未进入该阶段"
+                ),
+            },
         ]
     elif latest_crawl_no_work:
         stages = [
@@ -503,7 +579,19 @@ def main() -> int:
             {"name": "列表抓取", "status": "done" if not latest_event_listing_failures else "attention", "value": latest_result_raw_links, "note": "原始详情链接"},
             {"name": "去重", "status": "done", "value": latest_result_unique, "note": f"移除 {duplicates} 个重复"},
             {"name": "媒体解析", "status": stage_status, "value": media_value, "note": f"本次处理 {attempted} 个详情，安全拦截 {event_blocked} 个" if event_blocked else f"本次处理 {attempted} 个详情"},
-            {"name": "下载入库", "status": stage_status if stage_status == "attention" else "done", "value": event_counter(latest_event, "downloadedVideos"), "note": f"目标目录：{STAGING.name}"},
+            {
+                "name": "下载入库",
+                "status": stage_status if stage_status == "attention" else "done",
+                # download.py reports "skipped" for a file that is already in
+                # place.  Counting only fresh downloads made a successful re-run
+                # look like it ingested nothing at all.
+                "value": event_counter(latest_event, "downloadedVideos") + event_counter(latest_event, "alreadyPresentVideos"),
+                "note": (
+                    f"目标目录：{STAGING.name}；{event_counter(latest_event, 'alreadyPresentVideos')} 个文件已存在"
+                    if event_counter(latest_event, "alreadyPresentVideos")
+                    else f"目标目录：{STAGING.name}"
+                ),
+            },
         ]
     else:
         stages = [
@@ -592,6 +680,7 @@ def main() -> int:
                 "newVideos": event_counter(latest_event, "newVideos"),
                 "retryVideos": event_counter(latest_event, "retryVideos"),
                 "downloadedVideos": event_counter(latest_event, "downloadedVideos"),
+                "alreadyPresentVideos": event_counter(latest_event, "alreadyPresentVideos"),
                 "duplicateVideos": event_counter(latest_event, "duplicateVideos"),
                 "blockedVideos": int(
                     latest_event.get("blockedVideos")

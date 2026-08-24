@@ -24,7 +24,8 @@ DATA = PROJECT / "data"
 DAILY_CONFIG = PROJECT / "config" / "daily-sources.json"
 RUN_HISTORY = DATA / "run-history.jsonl"
 REFRESH_MONITOR = PROJECT / "scripts" / "refresh-monitor.py"
-SAFE_RESOLVE_FAILURE_KINDS = {"media_mismatch", "media_unavailable"}
+sys.path.append(str(PROJECT / "public-video-crawler"))
+from crawler import BLOCKED_MEDIA_FAILURE_KINDS as SAFE_RESOLVE_FAILURE_KINDS  # noqa: E402
 AUTH_DETECTOR_VERSION = 3
 
 

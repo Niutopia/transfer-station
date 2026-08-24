@@ -141,25 +141,35 @@ def update_snapshot(
 ) -> None:
     attempted_by_key = {video.viewkey: video for video in attempted}
     videos = snapshot.get("videos") if isinstance(snapshot.get("videos"), list) else []
+    changed = False
     for raw in videos:
         if not isinstance(raw, dict):
             continue
         video = attempted_by_key.get(str(raw.get("viewkey") or ""))
         if video is None:
             continue
+        if raw.get("media_url") != video.media_url or raw.get("resolved_at") != video.resolved_at:
+            changed = True
         raw["media_url"] = video.media_url
         raw["resolved_at"] = video.resolved_at
 
     metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
     previous_failures = metadata.get("resolve_failures") if isinstance(metadata.get("resolve_failures"), list) else []
     attempted_keys = set(attempted_by_key)
-    metadata["resolve_failures"] = [
+    resolve_failures = [
         item for item in previous_failures
         if isinstance(item, dict) and str(item.get("viewkey") or "") not in attempted_keys
     ] + failures
-    metadata["authenticated"] = crawler.auth_cookie_configured()
+    authenticated = crawler.auth_cookie_configured()
+    if resolve_failures != previous_failures or metadata.get("authenticated") != authenticated:
+        changed = True
+    metadata["resolve_failures"] = resolve_failures
+    metadata["authenticated"] = authenticated
     snapshot["metadata"] = metadata
-    atomic_json(SNAPSHOT, snapshot)
+    # Rewriting an unchanged snapshot reset the file mtime the dashboard uses to
+    # age the inventory, so a run of no-op repairs could hide stale crawl data.
+    if changed:
+        atomic_json(SNAPSHOT, snapshot)
 
 
 def run_logged(command: list[str], log_path: Path) -> int:
@@ -245,6 +255,9 @@ def run_repair(lock_path: Path) -> int:
     failed_downloads = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
     downloaded = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "downloaded")
     duplicates = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "duplicate")
+    # "skipped" means the file is already in place; without its own bucket a fully
+    # successful repair over existing files reported nothing at all.
+    already_present = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "skipped")
     downloaded_bytes = sum(int(row.get("bytes") or 0) for row in rows if isinstance(row, dict) and row.get("status") == "downloaded")
     auto_retry_attempts = sum(int(row.get("autoRetries") or 0) for row in rows if isinstance(row, dict))
     auto_retried_videos = sum(
@@ -280,6 +293,7 @@ def run_repair(lock_path: Path) -> int:
         "newVideos": 0,
         "retryVideos": len(attempted),
         "downloadedVideos": downloaded,
+        "alreadyPresentVideos": already_present,
         "duplicateVideos": duplicates,
         "blockedVideos": mismatch_count,
         "failedVideos": unresolved_count + failed_downloads,

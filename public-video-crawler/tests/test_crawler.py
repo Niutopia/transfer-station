@@ -1528,6 +1528,48 @@ class CrawlerTests(unittest.TestCase):
         self.assertEqual(body, "<html>ok</html>")
         self.assertEqual(opener.open.call_count, 2)
 
+    def test_latest_task_event_can_require_a_result_status(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "run-history.jsonl"
+            history.write_text(
+                json.dumps({"timestamp": "2026-08-20T10:00:00+08:00", "taskType": "crawl", "resultStatus": "success"}) + "\n"
+                + json.dumps({"timestamp": "2026-08-21T10:00:00+08:00", "taskType": "crawl", "resultStatus": "failed"}) + "\n",
+                encoding="utf-8",
+            )
+            newest = task_history.latest_task_event(history, "crawl")
+            completed = task_history.latest_task_event(history, "crawl", statuses={"success", "attention"})
+        self.assertEqual((newest or {}).get("resultStatus"), "failed")
+        self.assertEqual((completed or {}).get("timestamp"), "2026-08-20T10:00:00+08:00")
+
+    def test_repair_leaves_an_unchanged_snapshot_untouched(self) -> None:
+        # The dashboard ages the inventory by this file's mtime, so a no-op repair
+        # must not rewrite it — doing so hid stale crawl data indefinitely.
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot_path = Path(directory) / "videos-with-media.json"
+            snapshot = {
+                "metadata": {"resolve_failures": [], "authenticated": crawler.auth_cookie_configured()},
+                "videos": [{
+                    "viewkey": "abc12345",
+                    "media_url": "https://cdn.example/1.mp4",
+                    "resolved_at": "2026-08-23T10:00:00+08:00",
+                }],
+            }
+            snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+            os.utime(snapshot_path, (1_700_000_000, 1_700_000_000))
+            before = snapshot_path.stat().st_mtime
+            video = crawler.Video(
+                viewkey="abc12345",
+                canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+                media_url="https://cdn.example/1.mp4",
+                resolved_at="2026-08-23T10:00:00+08:00",
+            )
+            with mock.patch.object(repair_pending, "SNAPSHOT", snapshot_path):
+                repair_pending.update_snapshot(snapshot, [video], [])
+                self.assertEqual(snapshot_path.stat().st_mtime, before)
+                video.media_url = "https://cdn.example/2.mp4"
+                repair_pending.update_snapshot(snapshot, [video], [])
+            self.assertNotEqual(snapshot_path.stat().st_mtime, before)
+
     def test_fetch_html_identifies_a_challenge_served_as_503(self) -> None:
         # Cloudflare also answers with 429/503.  Reading the body only for 403
         # also skipped the cf-mitigated header check, so a challenged 503 looked

@@ -56,8 +56,18 @@ def event_counter(event: object, key: str, fallback: int = 0) -> int:
         return 0
 
 
-def latest_task_event(path: Path, task_type: str) -> dict[str, object] | None:
-    """Return the newest valid history row for one task type."""
+def latest_task_event(
+    path: Path,
+    task_type: str,
+    *,
+    statuses: frozenset[str] | set[str] | None = None,
+) -> dict[str, object] | None:
+    """Return the newest valid history row for one task type.
+
+    ``statuses`` narrows the search to runs that ended in one of those result
+    statuses, which is what callers asking "when did this last actually produce
+    data" need.
+    """
     if task_type not in {"crawl", "repair"}:
         raise ValueError("task_type must be crawl or repair")
     try:
@@ -73,6 +83,7 @@ def latest_task_event(path: Path, task_type: str) -> dict[str, object] | None:
             isinstance(event, dict)
             and event.get("timestamp")
             and event_task_type(event) == task_type
+            and (statuses is None or event_result_status(event) in statuses)
         ):
             return event
     return None

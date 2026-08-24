@@ -82,6 +82,7 @@ type MonitorData = {
       newVideos: number;
       retryVideos: number;
       downloadedVideos: number;
+      alreadyPresentVideos?: number;
       duplicateVideos: number;
       blockedVideos: number;
       ignoredVideos: number;
@@ -751,9 +752,9 @@ export default function Home() {
                 <span><small>{resultIsRepair ? "复核项目" : "检查链接"}</small><strong>{nf.format(resultIsRepair ? taskResult.retryVideos : taskResult.rawLinks)}</strong></span>
                 <span><small>{resultIsRepair ? "已恢复" : "新发现"}</small><strong>{nf.format(resultIsRepair ? taskResult.downloadedVideos : taskResult.newVideos)}</strong></span>
                 <span><small>本次入库</small><strong>{nf.format(taskResult.downloadedVideos)}</strong></span>
-                <span><small>{resultIsRepair ? taskResult.failedVideos ? "仍未完成" : taskResult.blockedVideos ? "安全跳过" : "复核项" : taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
+                <span><small>{resultIsRepair ? taskResult.failedVideos ? "仍未完成" : taskResult.blockedVideos ? "安全跳过" : taskResult.duplicateVideos ? "内容重复" : "复核项" : taskResult.failedVideos ? "失败" : taskResult.blockedVideos ? "媒体不匹配" : taskResult.duplicateVideos ? "内容重复" : "重试"}</small><strong>{nf.format(taskResult.failedVideos || taskResult.blockedVideos || taskResult.duplicateVideos || taskResult.retryVideos)}</strong></span>
               </div>
-              <p className="task-result-detail">{resultIsRepair ? `仅复核现有快照中的 ${nf.format(taskResult.retryVideos)} 个待处理项目，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.listingFailures ? `，${nf.format(taskResult.listingFailures)} 个榜单页面未成功读取` : ""}{taskResult.blockedVideos ? `，确认并永久跳过 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.autoRecoveredVideos ? `，自动恢复 ${nf.format(taskResult.autoRecoveredVideos)} 个下载` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
+              <p className="task-result-detail">{resultIsRepair ? `仅复核现有快照中的 ${nf.format(taskResult.retryVideos)} 个待处理项目，未重新抓取榜单` : `去重后 ${nf.format(taskResult.uniqueVideos)} 个视频，跳过 ${nf.format(taskResult.skippedVideos)} 个已知编号`}{taskResult.listingFailures ? `，${nf.format(taskResult.listingFailures)} 个榜单页面未成功读取` : ""}{taskResult.blockedVideos ? `，确认并永久跳过 ${nf.format(taskResult.blockedVideos)} 个错误媒体地址` : ""}{taskResult.duplicateVideos ? `，内容指纹拦截 ${nf.format(taskResult.duplicateVideos)} 个重复` : ""}{taskResult.alreadyPresentVideos ? `，${nf.format(taskResult.alreadyPresentVideos)} 个文件已存在无需重复下载` : ""}{taskResult.autoRecoveredVideos ? `，自动恢复 ${nf.format(taskResult.autoRecoveredVideos)} 个下载` : ""}{taskResult.downloadedBytes ? `，实际入库 ${formatBytes(taskResult.downloadedBytes)}` : ""}。</p>
               <div className="task-result-time"><span>完成于 {clock(taskResult.finishedAt ?? null)}</span><span>{taskResult.durationSeconds ? `耗时 ${formatDuration(taskResult.durationSeconds)}` : "耗时未记录"}</span></div>
             </> : <p className="task-result-detail">点击“开始抓取任务”后，这里会显示本次检查与下载数据。</p>}
             {taskAppearsActive && taskMessage && <p className="task-result-feedback success" role="status">{taskMessage}</p>}
