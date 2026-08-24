@@ -1567,6 +1567,32 @@ class CrawlerTests(unittest.TestCase):
             persisted = json.loads((root / "content.json").read_text(encoding="utf-8"))
             self.assertEqual(persisted["mediaAssets"], {"1235730": "abc12345"})
 
+    def test_seeding_skips_a_viewkey_that_stored_two_different_files(self) -> None:
+        """A viewkey with two hashes cannot say which media id its bytes are.
+
+        Guessing would write a *different* video into the success history and
+        retire it forever; skipping only falls back to the SHA-256 gate.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "content.json").write_text(json.dumps({
+                "version": 1,
+                "hashes": {
+                    hashlib.sha256(b"first").hexdigest(): {"viewkey": "amb12345", "bytes": 7},
+                    hashlib.sha256(b"second").hexdigest(): {"viewkey": "amb12345", "bytes": 9},
+                    hashlib.sha256(b"clean").hexdigest(): {"viewkey": "one12345", "bytes": 5},
+                },
+            }), encoding="utf-8")
+            (root / "video-history.json").write_text(json.dumps({
+                "videos": [
+                    {"viewkey": "amb12345", "media_url": "https://la.example.test/mp43/1111111.mp4?st=x"},
+                    {"viewkey": "one12345", "media_url": "https://la.example.test/mp43/2222222.mp4?st=y"},
+                ],
+            }), encoding="utf-8")
+            history = download.ContentHistory(root / "content.json", root / "video-history.json")
+            self.assertIsNone(history.media_asset_owner("1111111", "xyz98765"))
+            self.assertEqual(history.media_asset_owner("2222222", "xyz98765"), "one12345")
+
     def test_checking_a_media_id_never_locks_it_against_a_later_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

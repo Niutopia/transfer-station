@@ -234,8 +234,16 @@ class ContentHistory:
         rows = payload.get("videos") if isinstance(payload, dict) else None
         if not isinstance(rows, list):
             return
-        downloaded = {str(row.get("viewkey") or "") for row in self._items.values()}
-        downloaded.discard("")
+        # A viewkey holding two hashes comes from the era when a mismatched file
+        # could be stored under it, so which media id its bytes belong to is not
+        # decidable here.  Leave those out: a wrong entry would retire a *different*
+        # video permanently, while omitting one only costs the usual SHA-256 gate.
+        seen: dict[str, int] = {}
+        for value in self._items.values():
+            viewkey = str(value.get("viewkey") or "")
+            if viewkey:
+                seen[viewkey] = seen.get(viewkey, 0) + 1
+        downloaded = {viewkey for viewkey, count in seen.items() if count == 1}
         added = False
         with self._lock:
             for row in rows:
