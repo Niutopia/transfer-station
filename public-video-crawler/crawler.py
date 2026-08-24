@@ -25,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
@@ -479,11 +480,44 @@ def prune_blocked_media_history(path: Path | None, completed_keys: set[str]) -> 
     return removed
 
 
+def auth_credential_timestamp(path: Path | None = None) -> str:
+    """Return when the stored credential last changed, in run-history format."""
+    cookie_path = path or configured_auth_cookie_file()
+    if cookie_path is None:
+        return ""
+    try:
+        changed_at = cookie_path.stat().st_mtime
+    except OSError:
+        return ""
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(changed_at))
+
+
+def _timestamp_value(value: object) -> float | None:
+    try:
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def block_predates_credential(record: dict[str, object], credential_at: str) -> bool:
+    """Report whether a safe block was confirmed before the current credential.
+
+    Such a block deserves exactly one retry: the item may have been unusable only
+    because the session was missing.  ``update_blocked_media_history`` refreshes
+    ``lastSeenAt`` afterwards, so a still-blocked item converges back to skipped
+    instead of being re-fetched on every run.
+    """
+    credential = _timestamp_value(credential_at)
+    confirmed = _timestamp_value(record.get("lastSeenAt") or record.get("firstSeenAt"))
+    return bool(credential is not None and (confirmed is None or confirmed < credential))
+
+
 def matching_blocked_failures(
     videos: Iterable[Video],
     history: dict[str, dict[str, object]],
     *,
     success_keys: set[str] | None = None,
+    credential_at: str = "",
 ) -> list[dict[str, object]]:
     """Return persisted blocks that still match the listing asset identity."""
     failures: list[dict[str, object]] = []
@@ -497,6 +531,8 @@ def matching_blocked_failures(
         recorded_asset = str(record.get("expectedAsset") or "")
         current_asset = media_asset_identifier(video.thumbnail_url)
         if recorded_asset and current_asset and recorded_asset != current_asset:
+            continue
+        if credential_at and block_predates_credential(record, credential_at):
             continue
         kind = str(record.get("kind") or "media_mismatch")
         if kind not in BLOCKED_MEDIA_FAILURE_KINDS:
@@ -1230,9 +1266,15 @@ def main(argv: list[str] | None = None) -> int:
         success_keys.update(asset_duplicate_keys)
     authenticated = auth_cookie_configured()
     blocked_history = load_blocked_media_history(args.blocked_history)
-    persisted_block_failures = (
-        [] if authenticated
-        else matching_blocked_failures(videos, blocked_history, success_keys=success_keys)
+    # Discarding the whole table whenever a cookie file existed made it
+    # write-only: 56 confirmed-unusable pages were re-fetched on every run with
+    # no convergence.  Retry only what was confirmed before the current
+    # credential, which is the case a new session can actually change.
+    persisted_block_failures = matching_blocked_failures(
+        videos,
+        blocked_history,
+        success_keys=success_keys,
+        credential_at=auth_credential_timestamp() if authenticated else "",
     )
     persisted_block_keys = {str(item["viewkey"]) for item in persisted_block_failures}
     for video in videos:

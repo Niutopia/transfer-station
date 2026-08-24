@@ -96,16 +96,24 @@ def collect_repair_candidates(
     snapshot: object,
     completed_keys: set[str],
     *,
-    retry_blocked: bool = False,
+    retry_blocked_keys: set[str] | None = None,
     ignored_keys: set[str] | None = None,
 ) -> tuple[list[dict[str, object]], set[str]]:
+    """Pick the snapshot items worth re-resolving.
+
+    ``retry_blocked_keys`` names safe blocks that deserve one more attempt —
+    those confirmed before the current credential.  Retrying *every* block on
+    every run re-fetched dozens of known-bad detail pages without converging.
+    """
     if not isinstance(snapshot, dict):
         return [], set()
     metadata = snapshot.get("metadata") if isinstance(snapshot.get("metadata"), dict) else {}
     failures = metadata.get("resolve_failures") if isinstance(metadata, dict) else []
-    blocked_keys = set() if retry_blocked else {
+    retryable = retry_blocked_keys or set()
+    blocked_keys = {
         str(item.get("viewkey"))
-        for item in failures if is_blocked_failure(item) and item.get("viewkey")
+        for item in failures
+        if is_blocked_failure(item) and item.get("viewkey") and str(item.get("viewkey")) not in retryable
     } if isinstance(failures, list) else set()
     videos = snapshot.get("videos") if isinstance(snapshot.get("videos"), list) else []
     ignored = ignored_keys or set()
@@ -194,10 +202,17 @@ def run_repair(lock_path: Path) -> int:
         snapshot = {}
     completed = success_keys(DATA / "download-success.txt") | existing_keys(STAGING)
     ignored_keys = crawler.load_ignored_media_keys(IGNORED_MEDIA)
+    blocked_history = crawler.load_blocked_media_history(DATA / "blocked-media.json")
+    credential_at = crawler.auth_credential_timestamp() if crawler.auth_cookie_configured() else ""
+    retry_blocked_keys = {
+        key
+        for key, record in blocked_history.items()
+        if credential_at and crawler.block_predates_credential(record, credential_at)
+    }
     candidate_dicts, _ = collect_repair_candidates(
         snapshot,
         completed,
-        retry_blocked=crawler.auth_cookie_configured(),
+        retry_blocked_keys=retry_blocked_keys,
         ignored_keys=ignored_keys,
     )
     archive_completed_progress(DATA / "download-progress.json", DATA / "last-completed-progress.json")

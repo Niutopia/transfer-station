@@ -1757,6 +1757,64 @@ class CrawlerTests(unittest.TestCase):
             self.assertEqual([item["viewkey"] for item in matching], ["abc12345"])
             self.assertEqual(crawler.matching_blocked_failures([changed], history), [])
 
+    def test_a_newer_credential_retries_each_block_exactly_once(self) -> None:
+        # Discarding the whole table whenever a cookie file existed made it
+        # write-only and re-walked every known-bad page on every run.  A newer
+        # credential now buys one retry, and re-confirming the block converges.
+        with tempfile.TemporaryDirectory() as directory:
+            history_path = Path(directory) / "blocked-media.json"
+            video = crawler.Video(
+                viewkey="abc12345",
+                canonical_url="https://91porn.com/view_video.php?viewkey=abc12345",
+                thumbnail_url="https://cdn.example.test/thumb/1226511.jpg",
+            )
+            failure = {"viewkey": "abc12345", "kind": "media_mismatch", "error": "详情页媒体与榜单不一致"}
+            crawler.update_blocked_media_history(history_path, [video], [failure])
+            history = crawler.load_blocked_media_history(history_path)
+            confirmed_at = datetime.datetime.fromisoformat(str(history["abc12345"]["lastSeenAt"]))
+            newer_credential = (confirmed_at + datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+            older_credential = (confirmed_at - datetime.timedelta(hours=1)).isoformat(timespec="seconds")
+
+            # Credential newer than the confirmation: retry (the block is skipped).
+            self.assertEqual(
+                crawler.matching_blocked_failures([video], history, credential_at=newer_credential),
+                [],
+            )
+            # Credential older than the confirmation: keep skipping the item.
+            self.assertEqual(
+                [item["viewkey"] for item in crawler.matching_blocked_failures(
+                    [video], history, credential_at=older_credential,
+                )],
+                ["abc12345"],
+            )
+            # Without a credential the table behaves exactly as before.
+            self.assertEqual(
+                [item["viewkey"] for item in crawler.matching_blocked_failures([video], history)],
+                ["abc12345"],
+            )
+            # Re-confirming the block under the newer credential converges: the
+            # refreshed lastSeenAt makes it a permanent skip again.
+            crawler.update_blocked_media_history(history_path, [video], [failure])
+            refreshed = crawler.load_blocked_media_history(history_path)
+            self.assertFalse(crawler.block_predates_credential(refreshed["abc12345"], older_credential))
+
+    def test_repair_retries_only_the_blocks_a_new_credential_can_change(self) -> None:
+        snapshot = {
+            "metadata": {"resolve_failures": [
+                {"viewkey": "stale0000000000000000", "kind": "media_mismatch", "error": "详情页媒体与榜单不一致"},
+                {"viewkey": "fresh0000000000000000", "kind": "media_mismatch", "error": "详情页媒体与榜单不一致"},
+            ]},
+            "videos": [
+                {"viewkey": "stale0000000000000000", "canonical_url": "https://91porn.com/view_video.php?viewkey=stale0000000000000000"},
+                {"viewkey": "fresh0000000000000000", "canonical_url": "https://91porn.com/view_video.php?viewkey=fresh0000000000000000"},
+            ],
+        }
+        candidates, blocked = repair_pending.collect_repair_candidates(
+            snapshot, set(), retry_blocked_keys={"stale0000000000000000"},
+        )
+        self.assertEqual([item["viewkey"] for item in candidates], ["stale0000000000000000"])
+        self.assertEqual(blocked, {"fresh0000000000000000"})
+
     def test_completed_items_are_pruned_from_blocked_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "blocked-media.json"
